@@ -1,0 +1,10 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+allowBuilds:
+  '@nestjs/core': true
+  argon2: true
+  esbuild: true
+  msgpackr-extract: true
+  '@scarf/scarf': false

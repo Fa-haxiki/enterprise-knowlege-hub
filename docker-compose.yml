@@ -1,0 +1,152 @@
+name: ekh
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${PG_USER:-postgres}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?set PG_PASSWORD in .env}
+      POSTGRES_DB: ${PG_DB:-ekh}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    # BullMQ 要求 noeviction（任务数据不可被驱逐）；缓存键均带 TTL 自行过期
+    command: redis-server --requirepass ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env} --maxmemory 1gb --maxmemory-policy noeviction
+    volumes:
+      - redisdata:/data
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "$${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: -Xms1g -Xmx1g
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    ports:
+      - "127.0.0.1:9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:?set NEO4J_PASSWORD in .env}
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_server_memory_heap_max__size: 1G
+    volumes:
+      - neo4jdata:/data
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER:-ekh}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:?set MINIO_PASSWORD in .env}
+    volumes:
+      - miniodata:/data
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  mineru:
+    image: ${MINERU_IMAGE:-mineru-api:latest}
+    build:
+      context: ./services/mineru
+    expose:
+      - "8700"
+    ports:
+      - "127.0.0.1:8700:8700"
+    # GPU 模式取消注释：
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  mem0:
+    image: mem0/mem0-api-server:latest
+    env_file: .env
+    expose:
+      - "8888"
+    ports:
+      - "127.0.0.1:8888:8888"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles: ["full"]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24
+    volumes:
+      - chdata:/var/lib/clickhouse
+    profiles: ["full"]
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:2
+    environment:
+      DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/${LANGFUSE_DB:-langfuse}
+      CLICKHOUSE_URL: http://clickhouse:8123
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_started
+    profiles: ["full"]
+
+  langfuse-web:
+    image: langfuse/langfuse:2
+    environment:
+      DATABASE_URL: postgresql://${PG_USER:-postgres}:${PG_PASSWORD}@postgres:5432/${LANGFUSE_DB:-langfuse}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      NEXTAUTH_SECRET: ${LANGFUSE_SECRET:-change-me-langfuse-secret}
+      SALT: ${LANGFUSE_SALT:-change-me-langfuse-salt}
+      NEXTAUTH_URL: http://localhost:3100
+    ports:
+      - "127.0.0.1:3100:3000"
+    depends_on:
+      langfuse-worker:
+        condition: service_started
+    profiles: ["full"]
+
+volumes:
+  pgdata:
+  redisdata:
+  esdata:
+  neo4jdata:
+  miniodata:
+  chdata:

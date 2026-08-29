@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "noEmit": true,
+    "baseUrl": "./",
+    "paths": {
+      "@ekh/shared": ["../../packages/shared/src/index.ts"],
+      "@ekh/api/*": ["../../apps/api/src/*"]
+    }
+  },
+  "include": ["src", "../../apps/api/src", "../../packages/shared/src"]
+}

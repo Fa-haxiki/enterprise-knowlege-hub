@@ -1,0 +1,44 @@
+---
+description: 开发过程中遇到难点或坑时，必须记录到 docs/pitfalls/ 对应模块文件
+alwaysApply: true
+---
+
+# 坑点记录规则
+
+开发过程中遇到以下情况时，**修复后必须立即**将记录追加到 `docs/pitfalls/` 下对应模块的 md 文件：
+
+- 排查耗时较长（非显而易见的 bug、环境问题、构建失败）
+- 容易复发或对其他开发者有警示价值的问题
+- 框架/工具的版本特异性行为（如 pnpm、TypeORM、LangGraph 的坑）
+
+## 模块划分
+
+按问题归属选择文件，模块索引见 `docs/pitfalls/README.md`：
+
+- `toolchain.md` — pnpm、webpack、nest-cli、TypeScript 等构建与工具链
+- `database.md` — PostgreSQL、TypeORM、pgvector、migration
+- `backend.md` — NestJS 后端：配置、模块依赖、守卫、SSE
+- `agent.md` — LangGraph、RAG 链路、LLM/Embedding 接入
+- `middleware.md` — Elasticsearch、Redis、MinIO、Ollama 等中间件
+- `frontend.md` — React、Vite、Tailwind、SSE 解析
+
+现有模块都不匹配时，新建模块文件并在 `docs/pitfalls/README.md` 索引表登记。
+
+## 记录格式
+
+每条记录包含四要素，保持简洁可检索：
+
+```markdown
+## <简短标题>
+
+- **现象**：报错信息或异常行为（保留关键原文）
+- **根因**：一句话说明本质原因
+- **修复**：具体做法（含文件路径）
+- **相关**：涉及的文件/模块
+```
+
+## 要求
+
+- 修复问题后**顺手记录**，不要攒批
+- 标题用中文、带关键词，便于搜索
+- 不记录一次性笔误、纯业务逻辑 bug 等无复用价值的问题
