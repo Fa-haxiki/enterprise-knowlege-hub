@@ -22,6 +22,7 @@ interface Message {
   streaming?: boolean;
   statusText?: string;
   triples?: [string, string, string][];
+  complexity?: 'simple' | 'complex' | null;
 }
 
 interface Conversation {
@@ -124,7 +125,9 @@ export default function ChatPage() {
         if (frame.event === 'done') {
           setMessages((prev) =>
             prev.map((m) =>
-              m.id === assistantMsg.id ? { ...m, id: data.message_id, streaming: false } : m,
+              m.id === assistantMsg.id
+                ? { ...m, id: data.message_id, streaming: false, complexity: data.complexity }
+                : m,
             ),
           );
           if (!conversationId) navigate(`/chat/${data.conversation_id}`, { replace: true });
@@ -289,6 +292,11 @@ export default function ChatPage() {
                       <span className="inline-block h-3 w-3 animate-spin rounded-full border border-slate-300 border-t-slate-600" />
                       {m.statusText}
                     </div>
+                  )}
+                  {m.role === 'assistant' && m.complexity === 'complex' && (
+                    <span className="mb-2 inline-block rounded bg-indigo-50 px-1.5 py-0.5 text-xs text-indigo-600">
+                      图谱推理
+                    </span>
                   )}
                   <div className="whitespace-pre-wrap">{m.content}</div>
 

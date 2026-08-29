@@ -85,6 +85,9 @@ services:
     image: ${MINERU_IMAGE:-mineru-api:latest}
     build:
       context: ./services/mineru
+    volumes:
+      # 模型权重持久化到宿主机，避免容器重建后重新下载
+      - ./data/models:/root/models
     expose:
       - "8700"
     ports:

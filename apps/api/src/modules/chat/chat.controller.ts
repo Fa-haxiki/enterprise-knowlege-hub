@@ -105,7 +105,7 @@ export class ChatController {
 
     const t0 = Date.now();
     try {
-      const result = await this.agent.run(
+      const { state: result, traceId } = await this.agent.run(
         {
           query: dto.query,
           userId: user.userId,
@@ -135,6 +135,7 @@ export class ChatController {
         graphTriples: result.graphTriples,
         nodeLatencies: result.nodeLatencies,
         degradedNodes: result.degraded,
+        langfuseTraceId: traceId ?? undefined,
       });
 
       // meta 帧在生成前未能发出（message_id 依赖落库），此处通过 done 帧补齐
@@ -144,7 +145,11 @@ export class ChatController {
         node_latencies: result.nodeLatencies,
         degraded: result.degraded,
       });
-      send(SseEvent.DONE, { message_id: assistantMsg.id, conversation_id: conv.id });
+      send(SseEvent.DONE, {
+        message_id: assistantMsg.id,
+        conversation_id: conv.id,
+        complexity: result.complexity ?? null,
+      });
 
       this.audit.record({
         userId: user.userId,

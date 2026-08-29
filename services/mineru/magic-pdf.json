@@ -1,0 +1,17 @@
+{
+  "models-dir": "/root/models/models",
+  "device-mode": "cpu",
+  "layout-config": {
+    "model": "doclayout_yolo"
+  },
+  "formula-config": {
+    "mfd_model": "yolo_v8_mfd",
+    "mfr_model": "unimernet_small",
+    "enable": false
+  },
+  "table-config": {
+    "model": "rapid_table",
+    "enable": true
+  },
+  "config_version": "1.1.1"
+}

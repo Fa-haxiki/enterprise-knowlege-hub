@@ -57,28 +57,44 @@ export class MemoryService {
     await this.redis.raw.set(summaryKey(conversationId), summary, 'EX', 24 * 3600);
   }
 
-  /** Mem0 长期记忆检索；故障返回空（降级） */
+  /**
+   * Mem0 长期记忆检索：user 级（跨会话画像）+ session 级（本会话事实）两级并行，
+   * 合并去重；单级故障不影响另一级，整体故障返回空（降级）。
+   */
   async searchLongTerm(userId: string, conversationId: string, query: string): Promise<string[]> {
-    const url = this.config.get<string>('mem0.url');
-    try {
-      const res = await fetch(`${url}/v1/memories/search/`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(this.config.get<string>('mem0.apiKey')
-            ? { Authorization: `Token ${this.config.get<string>('mem0.apiKey')}` }
-            : {}),
-        },
-        body: JSON.stringify({ query, user_id: userId, limit: 5 }),
-        signal: AbortSignal.timeout(3_000),
-      });
-      if (!res.ok) throw new Error(`mem0 ${res.status}`);
-      const json = (await res.json()) as { results?: { memory: string }[] };
-      return (json.results ?? []).map((r) => r.memory);
-    } catch (e) {
-      this.logger.warn(`mem0 search degraded: ${(e as Error).message}`);
-      return [];
+    const [userResult, sessionResult] = await Promise.allSettled([
+      this.searchMem0({ query, user_id: userId, limit: 5 }),
+      this.searchMem0({ query, user_id: userId, session_id: conversationId, limit: 3 }),
+    ]);
+    if (userResult.status === 'rejected') {
+      this.logger.warn(`mem0 user-level search degraded: ${(userResult.reason as Error).message}`);
     }
+    if (sessionResult.status === 'rejected') {
+      this.logger.warn(`mem0 session-level search degraded: ${(sessionResult.reason as Error).message}`);
+    }
+    const merged = [
+      ...(sessionResult.status === 'fulfilled' ? sessionResult.value : []),
+      ...(userResult.status === 'fulfilled' ? userResult.value : []),
+    ];
+    return [...new Set(merged)];
+  }
+
+  private async searchMem0(body: Record<string, unknown>): Promise<string[]> {
+    const url = this.config.get<string>('mem0.url');
+    const res = await fetch(`${url}/v1/memories/search/`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(this.config.get<string>('mem0.apiKey')
+          ? { Authorization: `Token ${this.config.get<string>('mem0.apiKey')}` }
+          : {}),
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (!res.ok) throw new Error(`mem0 ${res.status}`);
+    const json = (await res.json()) as { results?: { memory: string }[] };
+    return (json.results ?? []).map((r) => r.memory);
   }
 
   /** 异步写入长期记忆（不阻塞主流程） */

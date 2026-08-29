@@ -76,47 +76,69 @@ def _parse_with_magic_pdf(path: Path):
                 blocks.append({"type": "paragraph", "text": para, "page": 1})
         return blocks, 1
 
-    # PDF / Office：magic-pdf 管线
-    from magic_pdf.data.data_reader_writer import FileBasedDataReader
-    from magic_pdf.pipe.UNIPipe import UNIPipe
+    # PDF / Office：magic-pdf 1.3.x 管线（PymuDocDataset + doc_analyze）
+    import json
+
+    from magic_pdf.config.enums import SupportedPdfParseMethod
+    from magic_pdf.data.data_reader_writer import FileBasedDataReader, FileBasedDataWriter
+    from magic_pdf.data.dataset import PymuDocDataset
+    from magic_pdf.model.doc_analyze_by_custom_model import doc_analyze
 
     reader = FileBasedDataReader("")
     pdf_bytes = reader.read(str(path))
-    pipe = UNIPipe(pdf_bytes, {"_parse_type": "auto", "_debug": False})
-    pipe.pipe_classify()
-    pipe.pipe_analyze()
-    pipe.pipe_parse()
+    ds = PymuDocDataset(pdf_bytes)
 
-    middle = pipe.get_middle_json()
-    import json
+    with tempfile.TemporaryDirectory() as img_dir:
+        image_writer = FileBasedDataWriter(img_dir)
+        if ds.classify() == SupportedPdfParseMethod.OCR:
+            infer_result = ds.apply(doc_analyze, ocr=True)
+            pipe_result = infer_result.pipe_ocr_mode(image_writer)
+        else:
+            infer_result = ds.apply(doc_analyze, ocr=False)
+            pipe_result = infer_result.pipe_txt_mode(image_writer)
+        middle_data = json.loads(pipe_result.get_middle_json())
 
-    middle_data = json.loads(middle)
     blocks = []
     pages = 0
     for page_info in middle_data.get("pdf_info", []):
         pages += 1
-        page_no = page_info.get("page_no", pages)
-        for block in page_info.get("preproc_blocks", []):
+        page_no = page_info.get("page_no", pages - 1) + 1
+        for block in page_info.get("para_blocks", []):
             btype = block.get("type", "text")
             bbox = block.get("bbox")
             if btype == "title":
                 text = _block_text(block)
-                blocks.append({"type": "heading", "level": block.get("level", 1) or 1,
-                               "text": text, "page": page_no, "bbox": bbox})
+                if text:
+                    blocks.append({"type": "heading", "level": block.get("level", 1) or 1,
+                                   "text": text, "page": page_no, "bbox": bbox})
             elif btype in ("text", "plain_text"):
                 text = _block_text(block)
                 if text:
                     blocks.append({"type": "paragraph", "text": text,
                                    "page": page_no, "bbox": bbox})
             elif btype == "table":
-                text = _block_text(block)
-                blocks.append({"type": "table", "text": text,
-                               "page": page_no, "bbox": bbox})
+                text = _table_html(block) or _block_text(block)
+                if text:
+                    blocks.append({"type": "table", "text": text,
+                                   "page": page_no, "bbox": bbox})
             elif btype == "interline_equation":
                 text = _block_text(block)
-                blocks.append({"type": "formula", "text": text,
-                               "page": page_no, "bbox": bbox})
+                if text:
+                    blocks.append({"type": "formula", "text": text,
+                                   "page": page_no, "bbox": bbox})
     return blocks, pages
+
+
+def _table_html(block) -> str:
+    """magic-pdf 1.3.x 表格块：table_body 内的 span 携带 html 字段。"""
+    for sub in block.get("blocks", []):
+        if sub.get("type") == "table_body":
+            for line in sub.get("lines", []):
+                for span in line.get("spans", []):
+                    html = span.get("html")
+                    if html:
+                        return html
+    return ""
 
 
 def _block_text(block) -> str:

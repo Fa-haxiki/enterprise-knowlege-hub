@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { Complexity, ErrorCode, MessageRole, type Citation, type Triple } from '@ekh/shared';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { ConversationEntity } from '../../database/entities/conversation.entity';
@@ -126,6 +126,7 @@ export class ChatService {
     return { total, page, page_size: pageSize, items };
   }
 
+  /** 历史消息：assistant 消息关联 qa_records 带出图谱推理链路与复杂度，供前端回放 */
   async listMessages(userId: string, conversationId: string, page = 1, pageSize = 50) {
     await this.assertOwner(userId, conversationId);
     const [items, total] = await this.messages.findAndCount({
@@ -134,7 +135,22 @@ export class ChatService {
       skip: (page - 1) * pageSize,
       take: pageSize,
     });
-    return { total, page, page_size: pageSize, items };
+
+    const assistantIds = items.filter((m) => m.role === MessageRole.ASSISTANT).map((m) => m.id);
+    const records = assistantIds.length
+      ? await this.qaRecords.find({ where: { messageId: In(assistantIds) } })
+      : [];
+    const recordMap = new Map(records.map((r) => [r.messageId, r]));
+
+    const enriched = items.map((m) => {
+      const record = recordMap.get(m.id);
+      return {
+        ...m,
+        triples: record?.graphTriples ?? [],
+        complexity: record?.complexity ?? null,
+      };
+    });
+    return { total, page, page_size: pageSize, items: enriched };
   }
 
   async rename(userId: string, conversationId: string, title: string) {

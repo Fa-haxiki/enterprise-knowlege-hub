@@ -76,7 +76,9 @@ export class GraphService implements OnModuleInit, OnModuleDestroy {
          WHERE n.name IN $names
          UNWIND relationships(path) AS rel
          WITH DISTINCT startNode(rel) AS s, rel, endNode(rel) AS t
-         RETURN s.name AS source, type(rel) AS relation, t.name AS target
+         WHERE type(rel) <> 'MENTIONS'
+         RETURN coalesce(s.name, s.chunk_id) AS source, type(rel) AS relation,
+                coalesce(t.name, t.chunk_id) AS target
          LIMIT 30`,
         { names: entities.map((e) => e.name) },
       );
@@ -124,10 +126,10 @@ export class GraphService implements OnModuleInit, OnModuleDestroy {
       );
       for (const e of payload.entities) {
         await session.run(
-          `MERGE (n:${e.type} {name: $name})
-           WITH c, n
+          `MATCH (c:Chunk {chunk_id: $chunkId})
+           MERGE (n:${e.type} {name: $name})
            MERGE (c)-[:MENTIONS]->(n)`,
-          { name: e.name },
+          { chunkId: payload.chunkId, name: e.name },
         );
       }
       for (const r of payload.relations) {
