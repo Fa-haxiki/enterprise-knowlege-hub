@@ -25,6 +25,17 @@ if [ ! -f apps/api/dist/main.js ] || [ ! -f apps/worker/dist/main.js ]; then
   pnpm -r --filter @ekh/api --filter @ekh/worker build
 fi
 
+# 3.5 Ollama（宿主机本地服务，不在 docker compose 内；embedding/reranker 依赖）
+if curl -sf --max-time 2 http://localhost:11434/api/tags >/dev/null 2>&1; then
+  echo "==> Ollama 已在运行 (:11434)，跳过"
+elif command -v ollama >/dev/null 2>&1; then
+  echo "==> 启动 Ollama..."
+  python3 "$ROOT/scripts/spawn-daemon.py" "$LOG_DIR/ollama.log" "$ROOT" ollama serve > "$PID_DIR/ollama.pid"
+  until curl -sf --max-time 2 http://localhost:11434/api/tags >/dev/null 2>&1; do sleep 1; done
+else
+  echo "==> 警告：未检测到 ollama，embedding/reranker 将不可用"
+fi
+
 port_in_use() { lsof -ti :"$1" >/dev/null 2>&1; }
 pid_alive() { [ -f "$PID_DIR/$1.pid" ] && kill -0 "$(cat "$PID_DIR/$1.pid")" 2>/dev/null; }
 

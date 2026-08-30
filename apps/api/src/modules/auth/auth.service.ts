@@ -8,6 +8,7 @@ import { v4 as uuid } from 'uuid';
 import { ErrorCode, SystemRole } from '@ekh/shared';
 import { UserEntity } from '../../database/entities/user.entity';
 import { RedisService } from '../../redis/redis.service';
+import { AuditService } from '../audit/audit.service';
 import { BizException } from '../../common/filters/http-exception.filter';
 import type { AuthUser } from '../../common/decorators/current-user.decorator';
 
@@ -24,6 +25,7 @@ export class AuthService {
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly redis: RedisService,
+    private readonly audit: AuditService,
   ) {}
 
   async register(email: string, password: string, name: string) {
@@ -37,6 +39,7 @@ export class AuthService {
       role: SystemRole.MEMBER,
     });
     await this.users.save(user);
+    this.audit.record({ userId: user.id, action: 'register', resourceType: 'user', resourceId: user.id });
     return this.issueTokens(user);
   }
 
@@ -55,11 +58,20 @@ export class AuthService {
         await this.redis.raw.set(lockKey, '1', 'EX', LOCK_SECONDS);
         await this.redis.raw.del(failKey);
       }
+      this.audit.record({
+        userId: user?.id ?? null,
+        action: 'login_failed',
+        resourceType: 'user',
+        resourceId: user?.id,
+        detail: { email, fails },
+        ip,
+      });
       throw new BizException(ErrorCode.CREDENTIAL_INVALID, '邮箱或密码错误', 401);
     }
 
     await this.redis.raw.del(`auth:fail:${email}`);
     this.logger.log(`user ${user.id} login from ${ip ?? 'unknown'}`);
+    this.audit.record({ userId: user.id, action: 'login', resourceType: 'user', resourceId: user.id, ip });
     return this.issueTokens(user);
   }
 
@@ -89,6 +101,7 @@ export class AuthService {
 
   async logout(userId: string, jti?: string) {
     if (jti) await this.redis.raw.del(this.refreshKey(userId, jti));
+    this.audit.record({ userId, action: 'logout', resourceType: 'user', resourceId: userId });
   }
 
   async revokeAll(userId: string) {

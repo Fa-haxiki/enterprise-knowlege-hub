@@ -20,6 +20,7 @@ import { CurrentUser, type AuthUser } from '../../common/decorators/current-user
 import { AgentService } from '../agents/agent.service';
 import { ChatService } from './chat.service';
 import { AuditService } from '../audit/audit.service';
+import { PromptInjectionService } from '../security/prompt-injection.service';
 import { RedisService } from '../../redis/redis.service';
 import { ConfigService } from '@nestjs/config';
 import { BizException } from '../../common/filters/http-exception.filter';
@@ -74,6 +75,7 @@ export class ChatController {
     private readonly audit: AuditService,
     private readonly redis: RedisService,
     private readonly config: ConfigService,
+    private readonly injection: PromptInjectionService,
   ) {}
 
   /** 问答主接口：SSE 流式 */
@@ -84,6 +86,25 @@ export class ChatController {
     @Res() res: Response,
   ) {
     await this.checkRateLimit(user.userId);
+
+    // Prompt 注入检测：命中后拒绝进入 LLM 链路并落审计
+    if (this.config.get<boolean>('security.injectionBlockEnabled')) {
+      const hit = this.injection.detect(dto.query);
+      if (hit) {
+        this.audit.record({
+          userId: user.userId,
+          action: 'prompt_injection_blocked',
+          resourceType: 'conversation',
+          resourceId: dto.conversation_id,
+          detail: { pattern: hit, query_preview: dto.query.slice(0, 100) },
+        });
+        throw new BizException(
+          ErrorCode.PARAM_INVALID,
+          '您的问题包含不安全指令，请调整后重试',
+          400,
+        );
+      }
+    }
 
     const conv = await this.chat.getOrCreateConversation(user.userId, dto.conversation_id, dto.workspace_id);
     // 新对话用首个问题自动生成标题
@@ -206,12 +227,20 @@ export class ChatController {
   }
 
   @Post('messages/:id/feedback')
-  feedback(
+  async feedback(
     @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: FeedbackDto,
   ) {
-    return this.chat.feedback(user.userId, id, dto.feedback, dto.comment);
+    const result = await this.chat.feedback(user.userId, id, dto.feedback, dto.comment);
+    this.audit.record({
+      userId: user.userId,
+      action: 'feedback',
+      resourceType: 'message',
+      resourceId: id,
+      detail: { feedback: dto.feedback },
+    });
+    return result;
   }
 
   /** 问答限流：20 次/分/用户 */

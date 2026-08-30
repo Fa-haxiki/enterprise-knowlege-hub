@@ -13,3 +13,5 @@ data/
 test-docs/
 logs/
 .pids/
+backups/
+deploy/certs/

@@ -14,6 +14,7 @@ import { WorkspaceRole } from '@ekh/shared';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser, type AuthUser } from '../../common/decorators/current-user.decorator';
 import { AclGuard, RequireWorkspaceRole } from '../workspaces/guards/acl.guard';
+import { AuditService } from '../audit/audit.service';
 import { DocumentsService } from './documents.service';
 import { UploadCompleteDto, UploadInitDto } from './dto/document.dto';
 
@@ -21,17 +22,28 @@ import { UploadCompleteDto, UploadInitDto } from './dto/document.dto';
 @UseGuards(JwtAuthGuard)
 @Controller({ version: '1' })
 export class DocumentsController {
-  constructor(private readonly documents: DocumentsService) {}
+  constructor(
+    private readonly documents: DocumentsService,
+    private readonly audit: AuditService,
+  ) {}
 
   @Post('workspaces/:workspaceId/documents/upload-init')
   @UseGuards(AclGuard)
   @RequireWorkspaceRole(WorkspaceRole.EDITOR)
-  uploadInit(
+  async uploadInit(
     @Param('workspaceId', ParseUUIDPipe) workspaceId: string,
     @CurrentUser() user: AuthUser,
     @Body() dto: UploadInitDto,
   ) {
-    return this.documents.uploadInit(workspaceId, user.userId, dto.filename, dto.file_size, dto.mime_type);
+    const result = await this.documents.uploadInit(workspaceId, user.userId, dto.filename, dto.file_size, dto.mime_type);
+    this.audit.record({
+      userId: user.userId,
+      action: 'document_upload',
+      resourceType: 'document',
+      resourceId: result.document_id,
+      detail: { workspace_id: workspaceId, filename: dto.filename, file_size: dto.file_size },
+    });
+    return result;
   }
 
   @Post('documents/:id/upload-complete')
@@ -78,20 +90,33 @@ export class DocumentsController {
   }
 
   @Post('documents/:id/reindex')
-  reindex(
+  async reindex(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: AuthUser,
     @Query('from_stage') fromStage?: 'parse' | 'chunk' | 'index' | 'graph',
   ) {
-    return this.documents.assertRole(user.userId, id, WorkspaceRole.EDITOR).then(() =>
-      this.documents.reindex(id, fromStage),
-    );
+    await this.documents.assertRole(user.userId, id, WorkspaceRole.EDITOR);
+    const result = await this.documents.reindex(id, fromStage);
+    this.audit.record({
+      userId: user.userId,
+      action: 'document_reindex',
+      resourceType: 'document',
+      resourceId: id,
+      detail: { from_stage: fromStage ?? 'index' },
+    });
+    return result;
   }
 
   @Delete('documents/:id')
-  remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthUser) {
-    return this.documents.assertRole(user.userId, id, WorkspaceRole.EDITOR).then(() =>
-      this.documents.remove(id),
-    );
+  async remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthUser) {
+    await this.documents.assertRole(user.userId, id, WorkspaceRole.EDITOR);
+    const result = await this.documents.remove(id);
+    this.audit.record({
+      userId: user.userId,
+      action: 'document_delete',
+      resourceType: 'document',
+      resourceId: id,
+    });
+    return result;
   }
 }

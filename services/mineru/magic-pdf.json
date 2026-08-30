@@ -1,5 +1,6 @@
 {
   "models-dir": "/root/models/models",
+  "layoutreader-model-dir": "/root/models/models/ppaanngggg--layoutreader/snapshots/master",
   "device-mode": "cpu",
   "layout-config": {
     "model": "doclayout_yolo"

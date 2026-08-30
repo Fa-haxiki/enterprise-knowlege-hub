@@ -15,7 +15,13 @@ async function seed() {
 
   const exists = await repo.findOne({ where: { email } });
   if (exists) {
-    console.log(`admin ${email} already exists, skipped`);
+    // 已存在但角色不对时升级为 sysadmin（例如曾被 register 接口以 member 创建）
+    if (exists.role !== SystemRole.SYSADMIN) {
+      await repo.update(exists.id, { role: SystemRole.SYSADMIN });
+      console.log(`admin ${email} role upgraded to sysadmin`);
+    } else {
+      console.log(`admin ${email} already exists, skipped`);
+    }
     await AppDataSource.destroy();
     return;
   }

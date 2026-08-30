@@ -37,6 +37,8 @@ services:
       discovery.type: single-node
       xpack.security.enabled: "false"
       ES_JAVA_OPTS: -Xms1g -Xmx1g
+      # fs 快照仓库白名单（备份脚本用）
+      path.repo: "/tmp/es-backup"
     volumes:
       - esdata:/usr/share/elasticsearch/data
     ports:
@@ -85,9 +87,13 @@ services:
     image: ${MINERU_IMAGE:-mineru-api:latest}
     build:
       context: ./services/mineru
+    environment:
+      # huggingface.co 国内不可达，layoutreader 等运行时模型走镜像站
+      HF_ENDPOINT: https://hf-mirror.com
     volumes:
       # 模型权重持久化到宿主机，避免容器重建后重新下载
       - ./data/models:/root/models
+      - ./data/hf-cache:/root/.cache/huggingface
     expose:
       - "8700"
     ports:
@@ -112,6 +118,15 @@ services:
       postgres:
         condition: service_healthy
     profiles: ["full"]
+
+  tts:
+    image: ${TTS_IMAGE:-ekh-tts:latest}
+    build:
+      context: ./services/tts
+    expose:
+      - "8750"
+    ports:
+      - "127.0.0.1:8750:8750"
 
   clickhouse:
     image: clickhouse/clickhouse-server:24
