@@ -14,6 +14,7 @@ import { WorkspaceRole } from '@ekh/shared';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser, type AuthUser } from '../../common/decorators/current-user.decorator';
 import { AclGuard, RequireWorkspaceRole } from './guards/acl.guard';
+import { AuditService } from '../audit/audit.service';
 import {
   AddMemberDto,
   CreateWorkspaceDto,
@@ -26,7 +27,10 @@ import { WorkspacesService } from './workspaces.service';
 @UseGuards(JwtAuthGuard)
 @Controller({ path: 'workspaces', version: '1' })
 export class WorkspacesController {
-  constructor(private readonly workspaces: WorkspacesService) {}
+  constructor(
+    private readonly workspaces: WorkspacesService,
+    private readonly audit: AuditService,
+  ) {}
 
   @Get()
   list(@CurrentUser() user: AuthUser) {
@@ -34,8 +38,16 @@ export class WorkspacesController {
   }
 
   @Post()
-  create(@CurrentUser() user: AuthUser, @Body() dto: CreateWorkspaceDto) {
-    return this.workspaces.create(user.userId, dto.name, dto.description);
+  async create(@CurrentUser() user: AuthUser, @Body() dto: CreateWorkspaceDto) {
+    const ws = await this.workspaces.create(user.userId, dto.name, dto.description);
+    this.audit.record({
+      userId: user.userId,
+      action: 'workspace_create',
+      resourceType: 'workspace',
+      resourceId: ws.id,
+      detail: { name: dto.name },
+    });
+    return ws;
   }
 
   @Patch(':id')
@@ -48,8 +60,15 @@ export class WorkspacesController {
   @Delete(':id')
   @UseGuards(AclGuard)
   @RequireWorkspaceRole(WorkspaceRole.OWNER)
-  remove(@Param('id', ParseUUIDPipe) id: string) {
-    return this.workspaces.remove(id);
+  async remove(@CurrentUser() user: AuthUser, @Param('id', ParseUUIDPipe) id: string) {
+    const result = await this.workspaces.remove(id);
+    this.audit.record({
+      userId: user.userId,
+      action: 'workspace_delete',
+      resourceType: 'workspace',
+      resourceId: id,
+    });
+    return result;
   }
 
   @Get(':id/members')
@@ -62,28 +81,58 @@ export class WorkspacesController {
   @Post(':id/members')
   @UseGuards(AclGuard)
   @RequireWorkspaceRole(WorkspaceRole.OWNER)
-  addMember(@Param('id', ParseUUIDPipe) id: string, @Body() dto: AddMemberDto) {
-    return this.workspaces.addMember(id, dto.user_id, dto.role);
+  async addMember(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AddMemberDto,
+  ) {
+    const result = await this.workspaces.addMember(id, dto.user_id, dto.role);
+    this.audit.record({
+      userId: user.userId,
+      action: 'member_grant',
+      resourceType: 'workspace',
+      resourceId: id,
+      detail: { target_user_id: dto.user_id, role: dto.role },
+    });
+    return result;
   }
 
   @Patch(':id/members/:userId')
   @UseGuards(AclGuard)
   @RequireWorkspaceRole(WorkspaceRole.OWNER)
-  updateMember(
+  async updateMember(
+    @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Param('userId', ParseUUIDPipe) userId: string,
     @Body() dto: UpdateMemberDto,
   ) {
-    return this.workspaces.updateMember(id, userId, dto.role);
+    const result = await this.workspaces.updateMember(id, userId, dto.role);
+    this.audit.record({
+      userId: user.userId,
+      action: 'member_update',
+      resourceType: 'workspace',
+      resourceId: id,
+      detail: { target_user_id: userId, role: dto.role },
+    });
+    return result;
   }
 
   @Delete(':id/members/:userId')
   @UseGuards(AclGuard)
   @RequireWorkspaceRole(WorkspaceRole.OWNER)
-  removeMember(
+  async removeMember(
+    @CurrentUser() user: AuthUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Param('userId', ParseUUIDPipe) userId: string,
   ) {
-    return this.workspaces.removeMember(id, userId);
+    const result = await this.workspaces.removeMember(id, userId);
+    this.audit.record({
+      userId: user.userId,
+      action: 'member_revoke',
+      resourceType: 'workspace',
+      resourceId: id,
+      detail: { target_user_id: userId },
+    });
+    return result;
   }
 }

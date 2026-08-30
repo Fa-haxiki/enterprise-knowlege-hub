@@ -2,7 +2,23 @@ import { FormEvent, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '@/lib/api';
 import { sseStream } from '@/lib/sse';
+import { TtsPlayer } from '@/lib/tts';
 import { useAuthStore } from '@/store/auth';
+
+/** 与后端 splitSentences 保持一致的切分（用于播放高亮） */
+function splitSentences(text: string): string[] {
+  const raw = text.match(/[^。！？!?；;\n]+[。！？!?；;\n]?/g) ?? [];
+  const sentences: string[] = [];
+  for (const piece of raw.map((s) => s.trim()).filter(Boolean)) {
+    const last = sentences[sentences.length - 1];
+    if (last !== undefined && last.length < 6) {
+      sentences[sentences.length - 1] = last + piece;
+    } else {
+      sentences.push(piece);
+    }
+  }
+  return sentences;
+}
 
 interface Citation {
   ref_id: number;
@@ -42,7 +58,61 @@ export default function ChatPage() {
   const [generating, setGenerating] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
+  const [autoSpeak, setAutoSpeak] = useState(() => localStorage.getItem('ekh-tts-auto') === '1');
+  const [playingMsgId, setPlayingMsgId] = useState<string | null>(null);
+  const [playingSentence, setPlayingSentence] = useState(-1);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const ttsRef = useRef<TtsPlayer | null>(null);
+  const autoSpeakRef = useRef(autoSpeak);
+  autoSpeakRef.current = autoSpeak;
+
+  const getTts = () => {
+    if (!ttsRef.current) {
+      ttsRef.current = new TtsPlayer({
+        onPlaySentence: (idx) => setPlayingSentence(idx),
+        onDone: () => {
+          // 音频队列播完后清除高亮（done 时可能还有排队音频，延迟清理）
+          setTimeout(() => {
+            setPlayingMsgId((cur) => {
+              if (cur) setPlayingSentence(-1);
+              return cur;
+            });
+          }, 500);
+        },
+        onError: () => {
+          setPlayingMsgId(null);
+          setPlayingSentence(-1);
+        },
+      });
+      ttsRef.current.connect(useAuthStore.getState().accessToken ?? '');
+    }
+    return ttsRef.current;
+  };
+
+  const stopSpeak = () => {
+    ttsRef.current?.stopPlayback();
+    setPlayingMsgId(null);
+    setPlayingSentence(-1);
+  };
+
+  const speakMessage = (m: Message) => {
+    if (playingMsgId === m.id) {
+      stopSpeak();
+      return;
+    }
+    setPlayingMsgId(m.id);
+    setPlayingSentence(-1);
+    getTts().speak(m.content);
+  };
+
+  const toggleAutoSpeak = () => {
+    const next = !autoSpeak;
+    setAutoSpeak(next);
+    localStorage.setItem('ekh-tts-auto', next ? '1' : '0');
+    if (!next) stopSpeak();
+  };
+
+  useEffect(() => () => ttsRef.current?.disconnect(), []);
 
   const loadConversations = () =>
     api
@@ -103,6 +173,7 @@ export default function ChatPage() {
       });
       if (!res.ok) throw new Error(`请求失败 ${res.status}`);
 
+      let fullContent = '';
       for await (const frame of sseStream(res)) {
         const data = JSON.parse(frame.data);
         setMessages((prev) =>
@@ -112,6 +183,7 @@ export default function ChatPage() {
               case 'status':
                 return { ...m, statusText: data.detail };
               case 'token':
+                fullContent += data.delta;
                 return { ...m, content: m.content + data.delta, statusText: undefined };
               case 'citation':
                 return { ...m, citations: [...(m.citations ?? []), data] };
@@ -132,6 +204,12 @@ export default function ChatPage() {
           );
           if (!conversationId) navigate(`/chat/${data.conversation_id}`, { replace: true });
           void loadConversations();
+          // 自动语音播报新回答
+          if (autoSpeakRef.current && fullContent) {
+            setPlayingMsgId(data.message_id);
+            setPlayingSentence(-1);
+            getTts().speak(fullContent);
+          }
         }
         if (frame.event === 'error') {
           setMessages((prev) =>
@@ -298,7 +376,26 @@ export default function ChatPage() {
                       图谱推理
                     </span>
                   )}
-                  <div className="whitespace-pre-wrap">{m.content}</div>
+                  {playingMsgId === m.id ? (
+                    <div className="whitespace-pre-wrap">
+                      {splitSentences(m.content).map((s, i) => (
+                        <span
+                          key={i}
+                          className={
+                            i === playingSentence
+                              ? 'rounded bg-yellow-100 transition-colors'
+                              : i < playingSentence
+                                ? 'text-slate-400'
+                                : undefined
+                          }
+                        >
+                          {s}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="whitespace-pre-wrap">{m.content}</div>
+                  )}
 
                   {/* 图谱推理链路 */}
                   {m.triples && m.triples.length > 0 && (
@@ -333,9 +430,9 @@ export default function ChatPage() {
                     </div>
                   )}
 
-                  {/* 反馈 */}
+                  {/* 反馈 + 语音 */}
                   {m.role === 'assistant' && !m.streaming && m.content && (
-                    <div className="mt-2 flex gap-2 text-xs text-slate-400">
+                    <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
                       <button
                         onClick={() => feedback(m.id, 1)}
                         className={m.feedback === 1 ? 'text-green-600' : 'hover:text-slate-600'}
@@ -348,6 +445,27 @@ export default function ChatPage() {
                       >
                         无用
                       </button>
+                      <button
+                        onClick={() => speakMessage(m)}
+                        className={`ml-1 inline-flex items-center gap-1 ${
+                          playingMsgId === m.id ? 'text-indigo-600' : 'hover:text-slate-600'
+                        }`}
+                        title={playingMsgId === m.id ? '停止播放' : '语音播放'}
+                      >
+                        {playingMsgId === m.id ? (
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+                            <rect x="6" y="5" width="4" height="14" rx="1" />
+                            <rect x="14" y="5" width="4" height="14" rx="1" />
+                          </svg>
+                        ) : (
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" />
+                            <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                            <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                          </svg>
+                        )}
+                        {playingMsgId === m.id ? '停止' : '播放'}
+                      </button>
                     </div>
                   )}
                 </div>
@@ -359,7 +477,23 @@ export default function ChatPage() {
 
         {/* 输入区 */}
         <div className="border-t border-slate-200 bg-white p-4">
-          <form onSubmit={send} className="mx-auto flex max-w-3xl gap-2">
+          <form onSubmit={send} className="mx-auto flex max-w-3xl items-center gap-2">
+            <button
+              type="button"
+              onClick={toggleAutoSpeak}
+              className={`flex items-center gap-1 rounded-md border px-2.5 py-2.5 text-xs ${
+                autoSpeak
+                  ? 'border-indigo-300 bg-indigo-50 text-indigo-600'
+                  : 'border-slate-300 text-slate-400 hover:text-slate-600'
+              }`}
+              title={autoSpeak ? '关闭自动语音播报' : '开启自动语音播报'}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" />
+                <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+              </svg>
+              {autoSpeak ? '语音开' : '语音关'}
+            </button>
             <input
               className="flex-1 rounded-md border border-slate-300 px-4 py-2.5 text-sm outline-none focus:border-slate-500"
               placeholder="输入问题，Enter 发送…"

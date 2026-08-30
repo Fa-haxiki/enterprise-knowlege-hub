@@ -6,6 +6,7 @@ import { DocumentEntity } from '../../database/entities/document.entity';
 import { BizException } from '../../common/filters/http-exception.filter';
 import { RedisService } from '../../redis/redis.service';
 import { AclService } from '../workspaces/acl.service';
+import { AclAlertService } from '../audit/acl-alert.service';
 import { IngestionProducer } from '../ingestion/ingestion.producer';
 import { StorageService } from './storage.service';
 
@@ -30,6 +31,7 @@ export class DocumentsService {
     private readonly ingestion: IngestionProducer,
     private readonly acl: AclService,
     private readonly redis: RedisService,
+    private readonly alert: AclAlertService,
   ) {}
 
   async uploadInit(workspaceId: string, uploaderId: string, filename: string, fileSize: number, mimeType: string) {
@@ -141,6 +143,11 @@ export class DocumentsService {
     const role = await this.acl.getRole(userId, doc.workspaceId);
     const rank: Record<WorkspaceRole, number> = { viewer: 1, editor: 2, owner: 3 };
     if (!role || rank[role] < rank[minRole]) {
+      await this.alert.trackDenied({
+        userId,
+        resource: 'document',
+        detail: { document_id: documentId, role: role ?? null, required: minRole },
+      });
       throw new BizException(ErrorCode.ACL_FORBIDDEN, '无权操作该文档', 403);
     }
     return doc;

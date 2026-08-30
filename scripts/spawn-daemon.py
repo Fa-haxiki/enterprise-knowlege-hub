@@ -20,12 +20,13 @@ def main() -> None:
         return
 
     os.setsid()
-    os.chdir(cwd)
     devnull = os.open(os.devnull, os.O_RDONLY)
     os.dup2(devnull, 0)
+    # 先打开日志再 chdir，避免相对路径失效
     log = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
     os.dup2(log, 1)
     os.dup2(log, 2)
+    os.chdir(cwd)
     os.execvp(cmd[0], cmd)
 
 

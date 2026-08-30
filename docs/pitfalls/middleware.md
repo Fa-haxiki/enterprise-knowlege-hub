@@ -1,5 +1,35 @@
 # 中间件坑点（ES / Redis / MinIO / Ollama / MinerU）
 
+## ES fs 快照必须配置 path.repo 白名单
+
+- **现象**：注册快照仓库报 `location [/tmp/es-backup] doesn't match any of the locations specified by path.repo because this setting is empty`，且 `wait_for_completion` 不报错时快照静默为空
+- **根因**：ES 安全设计，fs 仓库路径必须在 `path.repo` 白名单内；docker 镜像通过环境变量 `path.repo` 传入（entrypoint 自动转 elasticsearch.yml）
+- **修复**：compose 加 `path.repo: "/tmp/es-backup"`；备份脚本对 snapshot 响应断言 `"state":"SUCCESS"`，失败即中断
+- **教训**：备份脚本必须校验每步结果，"命令没报错" ≠ "备份成功"；恢复演练是唯一能证明备份有效的方式
+- **相关**：`docker-compose.yml`、`scripts/backup.sh`
+
+## Neo4j 社区版不支持 STOP DATABASE（企业版功能）
+
+- **现象**：`cypher-shell -d system "STOP DATABASE neo4j"` 报 `Unsupported administration command`
+- **根因**：多库管理操作（CREATE/STOP/START DATABASE）全是企业版功能，社区版只能停实例
+- **修复**：冷备方案——`docker stop` 后用临时容器挂载数据卷执行 `neo4j-admin database dump/load`
+- **相关**：`scripts/backup.sh`、`scripts/restore.sh`
+
+## magic-pdf 运行时还要下载 layoutreader 模型（huggingface 直连失败）
+
+- **现象**：MinerU 解析报 500 `Max retries exceeded with url: /hantian/layoutreader/resolve/main/config.json (SSLError)`
+- **根因**：magic-pdf 的阅读顺序排序依赖 layoutreader 模型，未包含在 PDF-Extract-Kit-1.0 仓内，运行时从 huggingface.co 下载；容器内直连 huggingface 被墙
+- **修复**：宿主机用 modelscope 下载 `ppaanngggg/layoutreader` 到 `data/models/`，`magic-pdf.json` 配置 `layoutreader-model-dir` 指向容器内挂载路径；compose 加 `HF_ENDPOINT=https://hf-mirror.com` 兜底其他 HF 下载
+- **注意**：modelscope 新版缓存结构是 `<cache_dir>/models/<org>--<repo>/snapshots/master`，配置路径要指到 snapshots/master 这一层
+- **相关**：`services/mineru/magic-pdf.json`、`docker-compose.yml`
+
+## Ollama 是宿主机进程，docker compose 管不到
+
+- **现象**：入库在 MinerU 解析成功后报 `fetch failed`，文档 FAILED
+- **根因**：Ollama 跑在宿主机（非容器），机器重启或手动关闭后，worker 的 embedding 请求失败；报错点远离根因（日志先看到 chunks 成功，再看到 fetch failed）
+- **修复**：`scripts/dev-up.sh` 增加 Ollama 检测与自动拉起；排查 `fetch failed` 时按调用链逐个 curl 健康端点（MinerU /health → Ollama /api/tags → ES /_cluster/health）
+- **相关**：`scripts/dev-up.sh`、`.env` EMBEDDING_BASE_URL
+
 ## magic-pdf 1.3.x 移除 magic_pdf.pipe 模块
 
 - **现象**：MinerU 解析报 500 `No module named 'magic_pdf.pipe'`

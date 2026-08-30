@@ -1,5 +1,13 @@
 # NestJS 后端坑点
 
+## @nestjs/websockets 必须与大版本对齐
+
+- **现象**：API 启动崩溃 `ERR_MODULE_NOT_FOUND: @nestjs/common/internal`
+- **根因**：`pnpm add @nestjs/websockets` 默认装最新 v12，但项目 NestJS 是 v10，v12 依赖 v11+ 的内部路径
+- **修复**：显式指定 `pnpm add @nestjs/websockets@^10 @nestjs/platform-socket.io@^10`
+- **教训**：NestJS 生态包（websockets/platform-*/throttler 等）必须与 @nestjs/core 大版本一致，安装时先看 @nestjs/core 版本
+- **相关**：`apps/api/package.json`
+
 ## Neo4j Cypher：WITH 引用未在作用域的变量
 
 - **现象**：入库建图阶段降级 `Variable 'c' not defined`，文档 READY 但图谱无数据

@@ -10,6 +10,7 @@
     "test": "jest"
   },
   "dependencies": {
+    "@ekh/api": "workspace:*",
     "@ekh/shared": "workspace:*",
     "@elastic/elasticsearch": "^8.15.0",
     "@langchain/core": "^0.3.29",
