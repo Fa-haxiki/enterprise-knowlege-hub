@@ -1,6 +1,8 @@
 import { ChangeEvent, DragEvent, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api, ApiError } from '@/lib/api';
+import DocPreviewModal, { type DocPreview } from '@/components/DocPreviewModal';
+import { useConfirm } from '@/components/ConfirmDialog';
 
 interface DocumentItem {
   id: string;
@@ -8,10 +10,13 @@ interface DocumentItem {
   status: string;
   file_size: number;
   error_msg: string | null;
+  review_note: string | null;
   created_at: string;
 }
 
 const STATUS_LABEL: Record<string, { label: string; className: string }> = {
+  PENDING_REVIEW: { label: '待审核', className: 'bg-amber-500/10 text-amber-600 dark:text-amber-400' },
+  REJECTED: { label: '已拒绝', className: 'bg-red-500/10 text-red-600 dark:text-red-400' },
   UPLOADED: { label: '待解析', className: 'bg-subtle text-ink-600' },
   PARSING: { label: '解析中', className: 'bg-blue-500/10 text-blue-600 dark:text-blue-400' },
   CHUNKING: { label: '分块中', className: 'bg-blue-500/10 text-blue-600 dark:text-blue-400' },
@@ -23,6 +28,12 @@ const STATUS_LABEL: Record<string, { label: string; className: string }> = {
 
 const PROCESSING = new Set(['UPLOADED', 'PARSING', 'CHUNKING', 'INDEXING', 'GRAPHING']);
 
+const formatSize = (bytes: number) => {
+  if (!Number.isFinite(bytes)) return '-';
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+};
+
 export default function DocumentsPage() {
   const { workspaceId } = useParams<{ workspaceId: string }>();
   const [docs, setDocs] = useState<DocumentItem[]>([]);
@@ -31,7 +42,18 @@ export default function DocumentsPage() {
   const [uploading, setUploading] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState('');
+  const [preview, setPreview] = useState<DocPreview | null>(null);
+  const { confirm, confirmDialog } = useConfirm();
   const fileInput = useRef<HTMLInputElement>(null);
+
+  const openPreview = async (docId: string) => {
+    try {
+      const doc = await api.get<DocPreview>(`/documents/${docId}/download-url`);
+      setPreview(doc);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : '获取预览失败');
+    }
+  };
 
   const load = async () => {
     if (!workspaceId) return;
@@ -122,7 +144,11 @@ export default function DocumentsPage() {
   };
 
   const remove = async (id: string) => {
-    if (!confirm('确认删除该文档？其分片、索引与图谱数据将被清理。')) return;
+    const ok = await confirm({
+      title: '删除文档',
+      description: '文档的分片、索引与图谱数据将被一并清理，此操作不可恢复。',
+    });
+    if (!ok) return;
     await api.delete(`/documents/${id}`);
     await load();
   };
@@ -132,7 +158,7 @@ export default function DocumentsPage() {
       <div className="mx-auto max-w-4xl">
         <div className="mb-5">
           <h1 className="text-lg font-semibold text-ink-900">文档管理</h1>
-          <p className="mt-1 text-sm text-ink-400">上传后自动解析、分块、索引并构建知识图谱</p>
+          <p className="mt-1 text-sm text-ink-400">上传后需部门审核员审核，通过后自动解析、分块、索引并构建知识图谱</p>
         </div>
         {error && (
           <p className="mb-4 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
@@ -197,19 +223,26 @@ export default function DocumentsPage() {
               return (
                 <div
                   key={doc.id}
-                  className="flex items-center gap-3 rounded-card border border-border bg-card px-4 py-3 shadow-card transition-colors hover:border-brand-500/30"
+                  className="group flex items-center gap-3 rounded-card border border-border bg-card px-4 py-3 shadow-card transition-colors hover:border-brand-500/30"
                 >
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-red-500/10 text-red-500">
+                  <button
+                    onClick={() => void openPreview(doc.id)}
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-red-500/10 text-red-500 transition-transform group-hover:scale-105"
+                    title="预览文档"
+                  >
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
                       <path d="M14 2v6h6" />
                     </svg>
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium text-ink-900">{doc.title}</div>
+                  </button>
+                  <div className="min-w-0 flex-1 cursor-pointer" onClick={() => void openPreview(doc.id)}>
+                    <div className="truncate text-sm font-medium text-ink-900 transition-colors group-hover:text-brand-700">{doc.title}</div>
                     <div className="mt-0.5 flex items-center gap-2 text-xs text-ink-400">
-                      <span>{(doc.file_size / 1024 / 1024).toFixed(1)} MB</span>
+                      <span>{formatSize(doc.file_size)}</span>
                       {doc.error_msg && <span className="truncate text-red-500">{doc.error_msg}</span>}
+                      {doc.status === 'REJECTED' && doc.review_note && (
+                        <span className="truncate text-red-500">拒绝理由：{doc.review_note}</span>
+                      )}
                     </div>
                     {PROCESSING.has(doc.status) && progress[doc.id] != null && (
                       <div className="mt-1.5 h-1 w-40 overflow-hidden rounded-full bg-subtle">
@@ -239,6 +272,9 @@ export default function DocumentsPage() {
             })}
           </div>
         )}
+
+        {preview && <DocPreviewModal doc={preview} onClose={() => setPreview(null)} />}
+        {confirmDialog}
       </div>
     </div>
   );

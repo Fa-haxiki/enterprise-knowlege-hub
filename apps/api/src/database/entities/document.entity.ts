@@ -43,6 +43,17 @@ export class DocumentEntity {
   @Column({ name: 'error_msg', type: 'text', nullable: true })
   errorMsg: string | null;
 
+  /** 审核人（部门审核员或兜底的 sysadmin） */
+  @Column({ name: 'reviewed_by', type: 'uuid', nullable: true })
+  reviewedBy: string | null;
+
+  @Column({ name: 'reviewed_at', type: 'timestamptz', nullable: true })
+  reviewedAt: Date | null;
+
+  /** 审核拒绝理由 */
+  @Column({ name: 'review_note', type: 'text', nullable: true })
+  reviewNote: string | null;
+
   @Column({ type: 'jsonb', default: {} })
   meta: Record<string, unknown>;
 

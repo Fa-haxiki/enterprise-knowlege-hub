@@ -34,3 +34,17 @@
 - **根因**：`strictPropertyInitialization` 与装饰器注入模式冲突
 - **修复**：`tsconfig.base.json` 设 `"strictPropertyInitialization": false`（NestJS 项目通行做法）
 - **相关**：`tsconfig.base.json`
+
+## dev-up.sh 跑的是 dist 产物，改代码不 rebuild 不生效
+
+- **现象**：改完 API/Worker 源码后 `dev-up.sh` 重启，行为完全没变，新实体表也没建
+- **根因**：`dev-up.sh` 用 `node dist/main.js` 启动，仅在 dist 缺失时才自动 build；源码变更后必须手动 `pnpm -r --filter @ekh/api --filter @ekh/worker build`
+- **修复**：改代码后先 build 再 `dev-down && dev-up`；排查"改了不生效"先确认 dist 时间戳
+- **相关**：`scripts/dev-up.sh`
+
+## seed 脚本 data-source.ts 的 .env 路径少一级导致 auth_failed
+
+- **现象**：`pnpm seed:admin` 报 `password authentication failed`，但 API 服务连接正常
+- **根因**：`data-source.ts` 用 `__dirname + '../../../.env'`，从 `src/database` 出发只解析到 `apps/.env`（不存在），PG_PASSWORD 落空；API 的 ConfigModule 用的是 `process.cwd() + '../../.env'` 指向仓库根
+- **修复**：改为 `'../../../../.env'`（src/database 与 dist/database 到仓库根均为四级）
+- **相关**：`apps/api/src/database/data-source.ts`

@@ -37,9 +37,15 @@ export class WorkspacesController {
     return this.workspaces.listMine(user.userId);
   }
 
+  /** 部门只读列表（建空间时选择挂靠，仅含我所属的部门），须在 :id 路由之前注册 */
+  @Get('departments')
+  departments(@CurrentUser() user: AuthUser) {
+    return this.workspaces.listDepartments(user);
+  }
+
   @Post()
   async create(@CurrentUser() user: AuthUser, @Body() dto: CreateWorkspaceDto) {
-    const ws = await this.workspaces.create(user.userId, dto.name, dto.description);
+    const ws = await this.workspaces.create(user, dto.name, dto.description, dto.department_id);
     this.audit.record({
       userId: user.userId,
       action: 'workspace_create',
@@ -53,8 +59,12 @@ export class WorkspacesController {
   @Patch(':id')
   @UseGuards(AclGuard)
   @RequireWorkspaceRole(WorkspaceRole.OWNER)
-  update(@Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateWorkspaceDto) {
-    return this.workspaces.update(id, dto);
+  update(
+    @CurrentUser() user: AuthUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateWorkspaceDto,
+  ) {
+    return this.workspaces.update(user, id, dto);
   }
 
   @Delete(':id')

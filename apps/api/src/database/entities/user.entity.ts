@@ -5,7 +5,7 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
-import { SystemRole } from '@ekh/shared';
+import { SystemRole, UserStatus } from '@ekh/shared';
 
 @Entity('users')
 export class UserEntity {
@@ -23,6 +23,14 @@ export class UserEntity {
 
   @Column({ type: 'varchar', length: 16, default: SystemRole.MEMBER })
   role: SystemRole;
+
+  /** 注册审核状态：PENDING 不可登录，ACTIVE 正常，REJECTED 审核未通过 */
+  @Column({ type: 'varchar', length: 16, default: UserStatus.PENDING })
+  status: UserStatus;
+
+  /** 注册审核拒绝理由 */
+  @Column({ name: 'review_note', type: 'text', nullable: true })
+  reviewNote: string | null;
 
   @Column({ type: 'jsonb', default: {} })
   profile: Record<string, unknown>;

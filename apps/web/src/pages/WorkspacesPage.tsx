@@ -7,7 +7,13 @@ interface Workspace {
   name: string;
   description: string | null;
   role: 'owner' | 'editor' | 'viewer';
+  department: { id: string; name: string } | null;
   created_at: string;
+}
+
+interface DepartmentOption {
+  id: string;
+  name: string;
 }
 
 const ROLE_LABEL = { owner: '所有者', editor: '编辑者', viewer: '查看者' } as const;
@@ -19,9 +25,11 @@ const ROLE_CLS = {
 
 export default function WorkspacesPage() {
   const [list, setList] = useState<Workspace[]>([]);
+  const [departments, setDepartments] = useState<DepartmentOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [departmentId, setDepartmentId] = useState('');
   const [error, setError] = useState('');
 
   const load = () =>
@@ -33,13 +41,25 @@ export default function WorkspacesPage() {
 
   useEffect(() => {
     void load();
+    api
+      .get<{ items: DepartmentOption[] }>('/workspaces/departments')
+      .then((d) => {
+        setDepartments(d.items);
+        // 部门必选：默认选中第一个
+        if (d.items.length > 0) setDepartmentId((prev) => prev || d.items[0].id);
+      })
+      .catch(() => setDepartments([]));
   }, []);
 
   const create = async (e: FormEvent) => {
     e.preventDefault();
     setError('');
     try {
-      await api.post('/workspaces', { name, description: description || undefined });
+      await api.post('/workspaces', {
+        name,
+        description: description || undefined,
+        department_id: departmentId,
+      });
       setName('');
       setDescription('');
       await load();
@@ -54,27 +74,46 @@ export default function WorkspacesPage() {
         <h1 className="mb-1 text-lg font-semibold text-ink-900">知识空间</h1>
         <p className="mb-5 text-sm text-ink-400">按团队或主题组织文档，空间成员共享检索权限</p>
 
-        <form
-          onSubmit={create}
-          className="mb-6 flex gap-2 rounded-card border border-border bg-card p-4 shadow-card"
-        >
-          <input
-            className="flex-1 rounded-lg border border-border bg-card px-3 py-2 text-sm outline-none transition-colors placeholder:text-ink-400 focus:border-brand-500"
-            placeholder="空间名称，如：财务部制度库"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            required
-          />
-          <input
-            className="flex-1 rounded-lg border border-border bg-card px-3 py-2 text-sm outline-none transition-colors placeholder:text-ink-400 focus:border-brand-500"
-            placeholder="描述（可选）"
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-          />
-          <button className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-brand-700">
-            创建
-          </button>
-        </form>
+        {departments.length === 0 && !loading ? (
+          <div className="mb-6 rounded-card border border-dashed border-border bg-card p-4 text-sm text-ink-400">
+            您还未加入任何部门，暂时无法创建空间。请联系您的部门管理员将您加入部门。
+          </div>
+        ) : (
+          <form
+            onSubmit={create}
+            className="mb-6 flex flex-wrap gap-2 rounded-card border border-border bg-card p-4 shadow-card"
+          >
+            <input
+              className="flex-1 min-w-40 rounded-lg border border-border bg-card px-3 py-2 text-sm outline-none transition-colors placeholder:text-ink-400 focus:border-brand-500"
+              placeholder="空间名称，如：财务部制度库"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+            />
+            <input
+              className="flex-1 min-w-40 rounded-lg border border-border bg-card px-3 py-2 text-sm outline-none transition-colors placeholder:text-ink-400 focus:border-brand-500"
+              placeholder="描述（可选）"
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+            <select
+              value={departmentId}
+              onChange={(e) => setDepartmentId(e.target.value)}
+              required
+              className="rounded-lg border border-border bg-card px-3 py-2 text-sm text-ink-600 outline-none transition-colors focus:border-brand-500"
+              title="挂靠部门：文档由该部门的管理员审核"
+            >
+              {departments.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
+            </select>
+            <button className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-brand-700">
+              创建
+            </button>
+          </form>
+        )}
         {error && (
           <p className="mb-4 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
             {error}
@@ -111,6 +150,14 @@ export default function WorkspacesPage() {
                 </div>
                 {ws.description && (
                   <div className="mt-2 line-clamp-2 text-sm leading-5 text-ink-400">{ws.description}</div>
+                )}
+                {ws.department && (
+                  <div className="mt-2 flex items-center gap-1 text-xs text-ink-400">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6" />
+                    </svg>
+                    {ws.department.name}
+                  </div>
                 )}
               </Link>
             ))}
