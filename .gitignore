@@ -11,3 +11,5 @@ coverage/
 uploads/
 data/
 test-docs/
+logs/
+.pids/
