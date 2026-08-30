@@ -14,6 +14,8 @@ interface SpeakPayload {
   text: string;
   voice?: string;
   rate?: string;
+  /** 客户端代次：帧原样回带，前端据此丢弃过期音频；服务端据此中断旧合成循环 */
+  gen?: number;
 }
 
 /** 按句切分：中英文句末标点 + 换行；过短句并入下一句，避免碎片音频 */
@@ -76,12 +78,16 @@ export class TtsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
 
+    const gen = payload.gen ?? Date.now();
+    client.data.speakGen = gen;
     const sentences = splitSentences(text);
     const ttsUrl = this.config.get<string>('tts.serviceUrl') ?? 'http://localhost:8750';
 
     for (let i = 0; i < sentences.length; i++) {
+      // 被新 speak 或 stop 取代时中断合成循环
+      if (client.data.speakGen !== gen) return;
       const sentence = sentences[i];
-      client.emit('sentence', { index: i, total: sentences.length, text: sentence });
+      client.emit('sentence', { index: i, total: sentences.length, text: sentence, gen });
       try {
         const res = await fetch(`${ttsUrl}/synthesize`, {
           method: 'POST',
@@ -91,13 +97,22 @@ export class TtsGateway implements OnGatewayConnection, OnGatewayDisconnect {
         });
         if (!res.ok) throw new Error(`tts service ${res.status}`);
         const buf = Buffer.from(await res.arrayBuffer());
-        client.emit('audio', { index: i, format: 'mp3', data: buf.toString('base64') });
+        if (client.data.speakGen !== gen) return;
+        client.emit('audio', { index: i, format: 'mp3', data: buf.toString('base64'), gen });
       } catch (e) {
         this.logger.warn(`tts sentence ${i} failed: ${(e as Error).message}`);
-        client.emit('error', { message: `第 ${i + 1} 句合成失败`, index: i });
-        // 单句失败不中断整体，继续下一句
+        client.emit('error', { message: `第 ${i + 1} 句合成失败`, index: i, gen });
+        // 合成失败即终止：使循环退出且不再合成后续语句，前端收到 error 后停止播放
+        client.data.speakGen = -1;
+        return;
       }
     }
-    client.emit('done', { total: sentences.length });
+    client.emit('done', { total: sentences.length, gen });
+  }
+
+  /** 停止播报：使进行中的合成循环退出 */
+  @SubscribeMessage('stop')
+  stop(client: Socket) {
+    client.data.speakGen = -1;
   }
 }

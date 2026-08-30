@@ -1,50 +1,31 @@
-import { FormEvent, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api } from '@/lib/api';
-import { sseStream } from '@/lib/sse';
+import { runChatAgent } from '@/lib/agui';
 import { TtsPlayer } from '@/lib/tts';
 import { useAuthStore } from '@/store/auth';
+import ConversationSidebar from '@/components/chat/ConversationSidebar';
+import MessageItem from '@/components/chat/MessageItem';
+import ChatInput from '@/components/chat/ChatInput';
+import EmptyChat from '@/components/chat/EmptyChat';
+import type { AgentStep, Conversation, Message } from '@/components/chat/types';
 
-/** 与后端 splitSentences 保持一致的切分（用于播放高亮） */
-function splitSentences(text: string): string[] {
-  const raw = text.match(/[^。！？!?；;\n]+[。！？!?；;\n]?/g) ?? [];
-  const sentences: string[] = [];
-  for (const piece of raw.map((s) => s.trim()).filter(Boolean)) {
-    const last = sentences[sentences.length - 1];
-    if (last !== undefined && last.length < 6) {
-      sentences[sentences.length - 1] = last + piece;
-    } else {
-      sentences.push(piece);
+/** status_detail 的 stage → LangGraph 节点名（用于把详情挂到对应步骤上） */
+const STAGE_TO_NODE: Record<string, string> = {
+  router: 'complexity_router',
+  retrieval: 'hybrid_retrieve',
+  graph: 'graph_reason',
+};
+
+function updateLastStep(steps: AgentStep[], pred: (s: AgentStep) => boolean, patch: Partial<AgentStep>): AgentStep[] {
+  for (let i = steps.length - 1; i >= 0; i--) {
+    if (pred(steps[i])) {
+      const next = [...steps];
+      next[i] = { ...next[i], ...patch };
+      return next;
     }
   }
-  return sentences;
-}
-
-interface Citation {
-  ref_id: number;
-  chunk_id: string;
-  document_id: string;
-  title: string;
-  page?: number;
-  snippet: string;
-}
-
-interface Message {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  citations?: Citation[];
-  feedback?: number;
-  streaming?: boolean;
-  statusText?: string;
-  triples?: [string, string, string][];
-  complexity?: 'simple' | 'complex' | null;
-}
-
-interface Conversation {
-  id: string;
-  title: string;
-  updated_at: string;
+  return steps;
 }
 
 export default function ChatPage() {
@@ -53,15 +34,21 @@ export default function ChatPage() {
   const accessToken = useAuthStore((s) => s.accessToken);
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [loadingConvs, setLoadingConvs] = useState(true);
+  const [loadingMsgs, setLoadingMsgs] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState('');
   const [generating, setGenerating] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editingTitle, setEditingTitle] = useState('');
   const [autoSpeak, setAutoSpeak] = useState(() => localStorage.getItem('ekh-tts-auto') === '1');
   const [playingMsgId, setPlayingMsgId] = useState<string | null>(null);
-  const [playingSentence, setPlayingSentence] = useState(-1);
+  const [hasMoreMsgs, setHasMoreMsgs] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMoreConvs, setHasMoreConvs] = useState(false);
+  const [loadingMoreConvs, setLoadingMoreConvs] = useState(false);
+  const convPageRef = useRef(1);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const msgPageRef = useRef(1);
+  const skipAutoScrollRef = useRef(false);
   const ttsRef = useRef<TtsPlayer | null>(null);
   const autoSpeakRef = useRef(autoSpeak);
   autoSpeakRef.current = autoSpeak;
@@ -69,20 +56,11 @@ export default function ChatPage() {
   const getTts = () => {
     if (!ttsRef.current) {
       ttsRef.current = new TtsPlayer({
-        onPlaySentence: (idx) => setPlayingSentence(idx),
         onDone: () => {
-          // 音频队列播完后清除高亮（done 时可能还有排队音频，延迟清理）
-          setTimeout(() => {
-            setPlayingMsgId((cur) => {
-              if (cur) setPlayingSentence(-1);
-              return cur;
-            });
-          }, 500);
+          // done 时可能还有排队音频，延迟清除播放状态
+          setTimeout(() => setPlayingMsgId(null), 500);
         },
-        onError: () => {
-          setPlayingMsgId(null);
-          setPlayingSentence(-1);
-        },
+        onError: () => setPlayingMsgId(null),
       });
       ttsRef.current.connect(useAuthStore.getState().accessToken ?? '');
     }
@@ -92,7 +70,6 @@ export default function ChatPage() {
   const stopSpeak = () => {
     ttsRef.current?.stopPlayback();
     setPlayingMsgId(null);
-    setPlayingSentence(-1);
   };
 
   const speakMessage = (m: Message) => {
@@ -101,7 +78,6 @@ export default function ChatPage() {
       return;
     }
     setPlayingMsgId(m.id);
-    setPlayingSentence(-1);
     getTts().speak(m.content);
   };
 
@@ -114,11 +90,40 @@ export default function ChatPage() {
 
   useEffect(() => () => ttsRef.current?.disconnect(), []);
 
-  const loadConversations = () =>
-    api
-      .get<{ items: Conversation[] }>('/conversations?page_size=50')
-      .then((d) => setConversations(d.items))
-      .catch(() => undefined);
+  /** 刷新对话列表第一页（新对话/重命名/删除后调用） */
+  const loadConversations = () => {
+    convPageRef.current = 1;
+    return api
+      .get<{ items: Conversation[]; has_more: boolean }>('/conversations?page=1&page_size=40')
+      .then((d) => {
+        setConversations(d.items);
+        setHasMoreConvs(d.has_more);
+      })
+      .catch(() => undefined)
+      .finally(() => setLoadingConvs(false));
+  };
+
+  /** 侧边栏滚动到底部时追加更早的一页（按 id 去重，防止 updatedAt 变化导致分页偏移重复） */
+  const loadMoreConversations = async () => {
+    if (loadingMoreConvs || !hasMoreConvs) return;
+    setLoadingMoreConvs(true);
+    try {
+      const next = convPageRef.current + 1;
+      const d = await api.get<{ items: Conversation[]; has_more: boolean }>(
+        `/conversations?page=${next}&page_size=40`,
+      );
+      convPageRef.current = next;
+      setHasMoreConvs(d.has_more);
+      setConversations((prev) => {
+        const seen = new Set(prev.map((c) => c.id));
+        return [...prev, ...d.items.filter((c) => !seen.has(c.id))];
+      });
+    } catch {
+      /* 失败保持现状，下次滚动再试 */
+    } finally {
+      setLoadingMoreConvs(false);
+    }
+  };
 
   useEffect(() => {
     void loadConversations();
@@ -127,23 +132,59 @@ export default function ChatPage() {
   useEffect(() => {
     if (!conversationId) {
       setMessages([]);
+      setHasMoreMsgs(false);
       return;
     }
+    setLoadingMsgs(true);
+    msgPageRef.current = 1;
     api
-      .get<{ items: Message[] }>(`/conversations/${conversationId}/messages?page_size=100`)
-      .then((d) => setMessages(d.items))
-      .catch(() => setMessages([]));
+      .get<{ items: Message[]; has_more: boolean }>(
+        `/conversations/${conversationId}/messages?page=1&page_size=20`,
+      )
+      .then((d) => {
+        setMessages(d.items);
+        setHasMoreMsgs(d.has_more);
+      })
+      .catch(() => setMessages([]))
+      .finally(() => setLoadingMsgs(false));
   }, [conversationId]);
 
   useEffect(() => {
+    // 向前翻页 prepend 时不滚到底部
+    if (skipAutoScrollRef.current) {
+      skipAutoScrollRef.current = false;
+      return;
+    }
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const send = async (e: FormEvent) => {
-    e.preventDefault();
-    const query = input.trim();
-    if (!query || generating) return;
-    setInput('');
+  /** 滚动到顶部时加载更早的一页，并保持视口位置不跳动 */
+  const loadEarlier = async () => {
+    if (!conversationId || loadingMore || !hasMoreMsgs) return;
+    setLoadingMore(true);
+    const el = scrollRef.current;
+    const prevHeight = el?.scrollHeight ?? 0;
+    try {
+      const next = msgPageRef.current + 1;
+      const d = await api.get<{ items: Message[]; has_more: boolean }>(
+        `/conversations/${conversationId}/messages?page=${next}&page_size=20`,
+      );
+      msgPageRef.current = next;
+      setHasMoreMsgs(d.has_more);
+      skipAutoScrollRef.current = true;
+      setMessages((prev) => [...d.items, ...prev]);
+      requestAnimationFrame(() => {
+        if (el) el.scrollTop = el.scrollHeight - prevHeight;
+      });
+    } catch {
+      /* 加载失败保持现状，下次滚动再试 */
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+
+  const send = async (query: string) => {
+    if (generating) return;
     setGenerating(true);
 
     const userMsg: Message = { id: `tmp-u-${Date.now()}`, role: 'user', content: query };
@@ -154,101 +195,88 @@ export default function ChatPage() {
       streaming: true,
       citations: [],
       triples: [],
+      steps: [],
     };
     setMessages((prev) => [...prev, userMsg, assistantMsg]);
+    const update = (fn: (m: Message) => Message) =>
+      setMessages((prev) => prev.map((m) => (m.id === assistantMsg.id ? fn(m) : m)));
 
+    let fullContent = '';
     try {
-      const res = await fetch('/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${accessToken}`,
-          Accept: 'text/event-stream',
-        },
-        body: JSON.stringify({
-          conversation_id: conversationId,
-          query,
-          options: { enable_graph: true },
-        }),
-      });
-      if (!res.ok) throw new Error(`请求失败 ${res.status}`);
-
-      let fullContent = '';
-      for await (const frame of sseStream(res)) {
-        const data = JSON.parse(frame.data);
-        setMessages((prev) =>
-          prev.map((m) => {
-            if (m.id !== assistantMsg.id) return m;
-            switch (frame.event) {
-              case 'status':
-                return { ...m, statusText: data.detail };
-              case 'token':
-                fullContent += data.delta;
-                return { ...m, content: m.content + data.delta, statusText: undefined };
-              case 'citation':
-                return { ...m, citations: [...(m.citations ?? []), data] };
-              case 'graph_path':
-                return { ...m, triples: data.triples };
-              default:
-                return m;
+      await runChatAgent({
+        accessToken: accessToken ?? '',
+        threadId: conversationId,
+        query,
+        handlers: {
+          onStepStart: (name) =>
+            update((m) => ({
+              ...m,
+              steps: [...(m.steps ?? []), { name, status: 'running' as const, startedAt: Date.now() }],
+            })),
+          onStepEnd: (name, latencyMs, degraded) =>
+            update((m) => ({
+              ...m,
+              steps: updateLastStep(
+                m.steps ?? [],
+                (s) => s.name === name && s.status === 'running',
+                { status: degraded ? 'degraded' : 'done', latencyMs },
+              ),
+            })),
+          onStatusDetail: (stage, detail) =>
+            update((m) => {
+              const node = STAGE_TO_NODE[stage];
+              return {
+                ...m,
+                steps: updateLastStep(
+                  m.steps ?? [],
+                  (s) => (node ? s.name === node : s.status === 'running'),
+                  { detail },
+                ),
+              };
+            }),
+          onToken: (delta) => {
+            fullContent += delta;
+            update((m) => ({ ...m, content: m.content + delta }));
+          },
+          onCitation: (c) => update((m) => ({ ...m, citations: [...(m.citations ?? []), c] })),
+          onGraphPath: (triples) => update((m) => ({ ...m, triples })),
+          onFinished: (result) => {
+            update((m) => ({
+              ...m,
+              id: result.message_id,
+              streaming: false,
+              complexity: result.complexity,
+            }));
+            if (!conversationId) navigate(`/chat/${result.conversation_id}`, { replace: true });
+            void loadConversations();
+            // 自动语音播报新回答
+            if (autoSpeakRef.current && fullContent) {
+              setPlayingMsgId(result.message_id);
+              getTts().speak(fullContent);
             }
-          }),
-        );
-        if (frame.event === 'done') {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantMsg.id
-                ? { ...m, id: data.message_id, streaming: false, complexity: data.complexity }
-                : m,
-            ),
-          );
-          if (!conversationId) navigate(`/chat/${data.conversation_id}`, { replace: true });
-          void loadConversations();
-          // 自动语音播报新回答
-          if (autoSpeakRef.current && fullContent) {
-            setPlayingMsgId(data.message_id);
-            setPlayingSentence(-1);
-            getTts().speak(fullContent);
-          }
-        }
-        if (frame.event === 'error') {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantMsg.id
-                ? { ...m, content: m.content || `出错了：${data.message}`, streaming: false }
-                : m,
-            ),
-          );
-        }
-      }
+          },
+          onError: (message) =>
+            update((m) => ({
+              ...m,
+              content: m.content || `出错了：${message}`,
+              streaming: false,
+            })),
+        },
+      });
     } catch (err) {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === assistantMsg.id
-            ? { ...m, content: `请求失败：${(err as Error).message}`, streaming: false }
-            : m,
-        ),
-      );
+      update((m) => ({
+        ...m,
+        content: `请求失败：${(err as Error).message}`,
+        streaming: false,
+      }));
     } finally {
       setGenerating(false);
     }
   };
 
-  const startRename = (c: Conversation) => {
-    setEditingId(c.id);
-    setEditingTitle(c.title);
-  };
-
-  const submitRename = async () => {
-    if (!editingId) return;
-    const title = editingTitle.trim();
-    if (title) {
-      await api.patch(`/conversations/${editingId}`, { title }).catch(() => undefined);
-      setConversations((prev) =>
-        prev.map((c) => (c.id === editingId ? { ...c, title } : c)),
-      );
-    }
-    setEditingId(null);
+  const renameConversation = async (id: string, title: string) => {
+    await api.patch(`/conversations/${id}`, { title }).catch(() => undefined);
+    setConversations((prev) => prev.map((c) => (c.id === id ? { ...c, title } : c)));
   };
 
   const removeConversation = async (id: string) => {
@@ -261,255 +289,73 @@ export default function ChatPage() {
   const feedback = async (messageId: string, value: 1 | -1) => {
     if (messageId.startsWith('tmp-')) return;
     await api.post(`/messages/${messageId}/feedback`, { feedback: value }).catch(() => undefined);
-    setMessages((prev) =>
-      prev.map((m) => (m.id === messageId ? { ...m, feedback: value } : m)),
-    );
+    setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, feedback: value } : m)));
   };
 
   return (
     <div className="flex h-full">
-      {/* 对话列表 */}
-      <div className="flex w-60 flex-col border-r border-slate-200 bg-white">
-        <div className="border-b border-slate-200 p-3">
-          <button
-            onClick={() => navigate('/chat')}
-            className="w-full rounded-md bg-slate-900 py-2 text-sm text-white hover:bg-slate-800"
-          >
-            新对话
-          </button>
-        </div>
-        <div className="flex-1 overflow-y-auto p-2">
-          {conversations.map((c) => (
-            <div
-              key={c.id}
-              className={`group relative flex items-center rounded-md ${
-                c.id === conversationId
-                  ? 'bg-slate-100 text-slate-900'
-                  : 'text-slate-600 hover:bg-slate-50'
-              }`}
-            >
-              {editingId === c.id ? (
-                <input
-                  autoFocus
-                  className="m-1 w-full rounded border border-slate-300 px-2 py-1 text-sm outline-none focus:border-slate-500"
-                  value={editingTitle}
-                  onChange={(e) => setEditingTitle(e.target.value)}
-                  onBlur={submitRename}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') void submitRename();
-                    if (e.key === 'Escape') setEditingId(null);
-                  }}
-                />
-              ) : (
-                <>
-                  <button
-                    onClick={() => navigate(`/chat/${c.id}`)}
-                    className="min-w-0 flex-1 truncate px-3 py-2 text-left text-sm"
-                    title={c.title}
-                  >
-                    {c.title}
-                  </button>
-                  <div className="absolute right-1 hidden items-center gap-0.5 group-hover:flex">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        startRename(c);
-                      }}
-                      className="rounded p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-700"
-                      title="重命名"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                      </svg>
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void removeConversation(c.id);
-                      }}
-                      className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600"
-                      title="删除"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M3 6h18" />
-                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-                        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                      </svg>
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
+      <ConversationSidebar
+        conversations={conversations}
+        activeId={conversationId}
+        loading={loadingConvs}
+        hasMore={hasMoreConvs}
+        loadingMore={loadingMoreConvs}
+        onLoadMore={() => void loadMoreConversations()}
+        onRename={renameConversation}
+        onRemove={removeConversation}
+      />
 
-      {/* 对话区 */}
       <div className="flex flex-1 flex-col">
-        <div className="flex-1 overflow-y-auto px-6 py-4">
+        <div
+          ref={scrollRef}
+          onScroll={(e) => {
+            if (e.currentTarget.scrollTop < 60) void loadEarlier();
+          }}
+          className="flex-1 overflow-y-auto px-6 py-6"
+        >
           <div className="mx-auto max-w-3xl space-y-6">
-            {messages.length === 0 && (
-              <div className="py-24 text-center">
-                <p className="text-lg font-medium text-slate-700">向知识库提问</p>
-                <p className="mt-2 text-sm text-slate-400">
-                  支持制度查询、项目关联分析等多轮问答，答案附引用来源
-                </p>
+            {loadingMore && (
+              <div className="flex items-center justify-center gap-1.5 py-1 text-xs text-ink-400">
+                <span className="h-3 w-3 animate-spin rounded-full border border-ink-400/30 border-t-ink-400" />
+                加载更早的消息…
               </div>
             )}
-            {messages.map((m) => (
-              <div key={m.id} className={m.role === 'user' ? 'text-right' : ''}>
-                <div
-                  className={`inline-block max-w-full rounded-lg px-4 py-3 text-left text-sm leading-6 ${
-                    m.role === 'user'
-                      ? 'bg-slate-900 text-white'
-                      : 'w-full border border-slate-200 bg-white'
-                  }`}
-                >
-                  {m.statusText && (
-                    <div className="mb-2 flex items-center gap-2 text-xs text-slate-400">
-                      <span className="inline-block h-3 w-3 animate-spin rounded-full border border-slate-300 border-t-slate-600" />
-                      {m.statusText}
-                    </div>
-                  )}
-                  {m.role === 'assistant' && m.complexity === 'complex' && (
-                    <span className="mb-2 inline-block rounded bg-indigo-50 px-1.5 py-0.5 text-xs text-indigo-600">
-                      图谱推理
-                    </span>
-                  )}
-                  {playingMsgId === m.id ? (
-                    <div className="whitespace-pre-wrap">
-                      {splitSentences(m.content).map((s, i) => (
-                        <span
-                          key={i}
-                          className={
-                            i === playingSentence
-                              ? 'rounded bg-yellow-100 transition-colors'
-                              : i < playingSentence
-                                ? 'text-slate-400'
-                                : undefined
-                          }
-                        >
-                          {s}
-                        </span>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="whitespace-pre-wrap">{m.content}</div>
-                  )}
-
-                  {/* 图谱推理链路 */}
-                  {m.triples && m.triples.length > 0 && (
-                    <div className="mt-3 rounded-md bg-slate-50 p-3">
-                      <div className="mb-1 text-xs font-medium text-slate-500">图谱推理链路</div>
-                      <div className="space-y-1">
-                        {m.triples.map((t, i) => (
-                          <div key={i} className="text-xs text-slate-600">
-                            <span className="font-medium">{t[0]}</span>
-                            <span className="mx-1 text-slate-400">—{t[1]}→</span>
-                            <span className="font-medium">{t[2]}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* 引用面板 */}
-                  {m.citations && m.citations.length > 0 && (
-                    <div className="mt-3 border-t border-slate-100 pt-2">
-                      <div className="mb-1 text-xs font-medium text-slate-500">引用来源</div>
-                      <div className="space-y-1">
-                        {m.citations.map((c) => (
-                          <div key={c.ref_id} className="text-xs text-slate-500">
-                            <span className="mr-1 rounded bg-slate-100 px-1 text-slate-600">
-                              {c.ref_id}
-                            </span>
-                            《{c.title}》{c.page ? ` P${c.page}` : ''} — {c.snippet}…
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* 反馈 + 语音 */}
-                  {m.role === 'assistant' && !m.streaming && m.content && (
-                    <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
-                      <button
-                        onClick={() => feedback(m.id, 1)}
-                        className={m.feedback === 1 ? 'text-green-600' : 'hover:text-slate-600'}
-                      >
-                        有用
-                      </button>
-                      <button
-                        onClick={() => feedback(m.id, -1)}
-                        className={m.feedback === -1 ? 'text-red-600' : 'hover:text-slate-600'}
-                      >
-                        无用
-                      </button>
-                      <button
-                        onClick={() => speakMessage(m)}
-                        className={`ml-1 inline-flex items-center gap-1 ${
-                          playingMsgId === m.id ? 'text-indigo-600' : 'hover:text-slate-600'
-                        }`}
-                        title={playingMsgId === m.id ? '停止播放' : '语音播放'}
-                      >
-                        {playingMsgId === m.id ? (
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
-                            <rect x="6" y="5" width="4" height="14" rx="1" />
-                            <rect x="14" y="5" width="4" height="14" rx="1" />
-                          </svg>
-                        ) : (
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" />
-                            <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-                            <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
-                          </svg>
-                        )}
-                        {playingMsgId === m.id ? '停止' : '播放'}
-                      </button>
-                    </div>
-                  )}
+            {loadingMsgs ? (
+              <div className="space-y-6 pt-4">
+                <div className="flex justify-end">
+                  <div className="skeleton h-10 w-2/5 rounded-bubble" />
+                </div>
+                <div className="flex gap-3">
+                  <div className="skeleton h-8 w-8 shrink-0 rounded-lg" />
+                  <div className="skeleton h-28 flex-1 rounded-bubble" />
+                </div>
+                <div className="flex justify-end">
+                  <div className="skeleton h-10 w-1/3 rounded-bubble" />
                 </div>
               </div>
-            ))}
+            ) : messages.length === 0 ? (
+              <EmptyChat onAsk={send} />
+            ) : (
+              messages.map((m) => (
+                <MessageItem
+                  key={m.id}
+                  message={m}
+                  playing={playingMsgId === m.id}
+                  onFeedback={feedback}
+                  onSpeak={speakMessage}
+                />
+              ))
+            )}
             <div ref={bottomRef} />
           </div>
         </div>
 
-        {/* 输入区 */}
-        <div className="border-t border-slate-200 bg-white p-4">
-          <form onSubmit={send} className="mx-auto flex max-w-3xl items-center gap-2">
-            <button
-              type="button"
-              onClick={toggleAutoSpeak}
-              className={`flex items-center gap-1 rounded-md border px-2.5 py-2.5 text-xs ${
-                autoSpeak
-                  ? 'border-indigo-300 bg-indigo-50 text-indigo-600'
-                  : 'border-slate-300 text-slate-400 hover:text-slate-600'
-              }`}
-              title={autoSpeak ? '关闭自动语音播报' : '开启自动语音播报'}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor" />
-                <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-              </svg>
-              {autoSpeak ? '语音开' : '语音关'}
-            </button>
-            <input
-              className="flex-1 rounded-md border border-slate-300 px-4 py-2.5 text-sm outline-none focus:border-slate-500"
-              placeholder="输入问题，Enter 发送…"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              disabled={generating}
-            />
-            <button
-              type="submit"
-              disabled={generating || !input.trim()}
-              className="rounded-md bg-slate-900 px-5 py-2.5 text-sm text-white hover:bg-slate-800 disabled:opacity-50"
-            >
-              发送
-            </button>
-          </form>
-        </div>
+        <ChatInput
+          generating={generating}
+          autoSpeak={autoSpeak}
+          onToggleAutoSpeak={toggleAutoSpeak}
+          onSend={send}
+        />
       </div>
     </div>
   );

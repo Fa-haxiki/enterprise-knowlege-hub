@@ -62,3 +62,10 @@
 - **根因**：ES 8 移除了 mapping 级 `boost`，改为查询时 boosting
 - **修复**：mapping 去掉 `boost`，在 query 的 `match` 子句上加权重
 - **相关**：`apps/api/src/modules/retrieval/es.service.ts`
+
+## MinIO 预签名 URL 设了 inline 仍触发下载
+
+- **现象**：`presignedGetObject` 传了 `response-content-disposition: inline`，浏览器打开仍下载而非预览
+- **根因**：分片上传时对象 Content-Type 落为 `binary/octet-stream`，浏览器对未知类型无视 inline 一律下载
+- **修复**：respHeaders 同时覆盖 `response-content-type` 为文档真实 MIME（如 `application/pdf`）
+- **相关**：`apps/api/src/modules/documents/storage.service.ts` presignDownload

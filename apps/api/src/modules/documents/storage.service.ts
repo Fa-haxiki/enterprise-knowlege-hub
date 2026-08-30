@@ -65,8 +65,28 @@ export class StorageService implements OnModuleInit {
     return { fileKey, size: merged.length };
   }
 
-  async presignDownload(fileKey: string, expirySeconds = 3600): Promise<string> {
-    return this.client.presignedGetObject(this.bucket, fileKey, expirySeconds);
+  /** 浏览器可直接预览的 MIME 类型（其余一律附件下载） */
+  static readonly INLINE_MIME = new Set([
+    'application/pdf',
+    'text/plain',
+    'text/markdown',
+    'text/html',
+  ]);
+
+  async presignDownload(
+    fileKey: string,
+    expirySeconds = 3600,
+    filename?: string,
+    mimeType?: string,
+  ): Promise<string> {
+    const inline = mimeType ? StorageService.INLINE_MIME.has(mimeType) : false;
+    const encoded = encodeURIComponent(filename ?? 'download');
+    const disposition = `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encoded}`;
+    return this.client.presignedGetObject(this.bucket, fileKey, expirySeconds, {
+      'response-content-disposition': disposition,
+      // 对象上传时 Content-Type 多为 octet-stream，不覆盖则浏览器无视 inline 直接下载
+      'response-content-type': mimeType ?? 'application/octet-stream',
+    });
   }
 
   async getObjectBuffer(fileKey: string): Promise<Buffer> {
