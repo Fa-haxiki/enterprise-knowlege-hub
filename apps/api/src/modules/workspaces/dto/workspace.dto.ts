@@ -11,6 +11,10 @@ export class CreateWorkspaceDto {
   @IsString()
   @MaxLength(2000)
   description?: string;
+
+  /** 挂靠部门（必填）：决定文档审核归属，只能选自己所属的部门 */
+  @IsUUID()
+  department_id: string;
 }
 
 export class UpdateWorkspaceDto {
@@ -24,6 +28,11 @@ export class UpdateWorkspaceDto {
   @IsString()
   @MaxLength(2000)
   description?: string;
+
+  /** 挂靠部门：决定文档审核员；传 null 解除挂靠（审核落入 sysadmin 兜底） */
+  @IsOptional()
+  @IsUUID()
+  department_id?: string | null;
 }
 
 export class AddMemberDto {

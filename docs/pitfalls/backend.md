@@ -29,3 +29,17 @@
 - **根因**：`worker.module.ts` import 了 API 的 `DocumentsModule`，把控制器、守卫等传递依赖全拉进来
 - **修复**：只直接 import 需要的纯服务（如 `StorageService`），缺什么依赖在 worker 自己的 `package.json` 补
 - **相关**：`apps/worker/src/worker.module.ts`
+
+## 自定义 Guard 依赖 req.user 时必须与 JwtAuthGuard 同挂
+
+- **现象**：AdminController 只挂 `@UseGuards(AdminGuard)`，所有请求 403（req.user 为 undefined）
+- **根因**：AdminGuard 读 `req.user.role`，但 req.user 由 JwtAuthGuard 填充；单独挂 AdminGuard 时它先于认证执行
+- **修复**：`@UseGuards(JwtAuthGuard, AdminGuard)` 按顺序同挂
+- **相关**：`apps/api/src/modules/admin/admin.controller.ts`、`common/guards/admin.guard.ts`
+
+## worker.module 显式 entities 数组：实体新增关系时需同步补关联实体
+
+- **现象**：worker 启动报 `Entity metadata for WorkspaceEntity#department was not found`，反复重连
+- **根因**：worker 的 TypeORM 用显式 `entities: [...]`（autoLoadEntities: false），WorkspaceEntity 新增 `department` 关系后，DepartmentEntity 未加入 worker 的 entities
+- **修复**：worker.module.ts 的 entities 数组补上 DepartmentEntity；同理 @Global 的 SecurityModule 也需在 worker.module imports 一次全局模块才在 worker 上下文生效
+- **相关**：`apps/worker/src/worker.module.ts`

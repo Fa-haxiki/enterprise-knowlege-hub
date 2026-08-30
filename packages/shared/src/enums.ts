@@ -11,8 +11,19 @@ export enum SystemRole {
   MEMBER = 'member',
 }
 
+/** 账号审核状态（注册申请制） */
+export enum UserStatus {
+  PENDING = 'PENDING',
+  ACTIVE = 'ACTIVE',
+  REJECTED = 'REJECTED',
+}
+
 /** 文档入库状态机 */
 export enum DocumentStatus {
+  /** 上传完成，等待部门审核员审核 */
+  PENDING_REVIEW = 'PENDING_REVIEW',
+  /** 审核未通过 */
+  REJECTED = 'REJECTED',
   UPLOADED = 'UPLOADED',
   PARSING = 'PARSING',
   CHUNKING = 'CHUNKING',

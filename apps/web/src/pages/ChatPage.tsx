@@ -8,6 +8,7 @@ import ConversationSidebar from '@/components/chat/ConversationSidebar';
 import MessageItem from '@/components/chat/MessageItem';
 import ChatInput from '@/components/chat/ChatInput';
 import EmptyChat from '@/components/chat/EmptyChat';
+import { useConfirm } from '@/components/ConfirmDialog';
 import type { AgentStep, Conversation, Message } from '@/components/chat/types';
 
 /** status_detail 的 stage → LangGraph 节点名（用于把详情挂到对应步骤上） */
@@ -44,6 +45,7 @@ export default function ChatPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMoreConvs, setHasMoreConvs] = useState(false);
   const [loadingMoreConvs, setLoadingMoreConvs] = useState(false);
+  const { confirm, confirmDialog } = useConfirm();
   const convPageRef = useRef(1);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -280,7 +282,11 @@ export default function ChatPage() {
   };
 
   const removeConversation = async (id: string) => {
-    if (!confirm('确认删除该对话？消息记录将一并删除。')) return;
+    const ok = await confirm({
+      title: '删除对话',
+      description: '该对话的全部消息记录将一并删除，此操作不可恢复。',
+    });
+    if (!ok) return;
     await api.delete(`/conversations/${id}`).catch(() => undefined);
     setConversations((prev) => prev.filter((c) => c.id !== id));
     if (id === conversationId) navigate('/chat');
@@ -356,6 +362,7 @@ export default function ChatPage() {
           onToggleAutoSpeak={toggleAutoSpeak}
           onSend={send}
         />
+        {confirmDialog}
       </div>
     </div>
   );

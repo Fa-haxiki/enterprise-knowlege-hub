@@ -2,7 +2,15 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/store/auth';
 import { useThemeStore } from '@/store/theme';
 
-const navItems = [
+interface NavItem {
+  to: string;
+  label: string;
+  icon: JSX.Element;
+  /** 可见条件：sysadmin 仅系统管理员；deptAdmin 部门管理员或系统管理员 */
+  visible?: (user: { role: string; is_dept_admin?: boolean }) => boolean;
+}
+
+const navItems: NavItem[] = [
   {
     to: '/chat',
     label: '智能问答',
@@ -22,6 +30,38 @@ const navItems = [
       </svg>
     ),
   },
+  {
+    to: '/review',
+    label: '文档审核',
+    visible: (u) => u.role === 'sysadmin' || !!u.is_dept_admin,
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M9 12l2 2 4-4" />
+        <path d="M12 3l7 4v5c0 4.5-3 8-7 9-4-1-7-4.5-7-9V7l7-4Z" />
+      </svg>
+    ),
+  },
+  {
+    to: '/department',
+    label: '我的部门',
+    visible: (u) => u.role !== 'sysadmin' && !!u.is_dept_admin,
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6" />
+      </svg>
+    ),
+  },
+  {
+    to: '/admin',
+    label: '管理后台',
+    visible: (u) => u.role === 'sysadmin',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" />
+      </svg>
+    ),
+  },
 ];
 
 export default function Layout() {
@@ -33,6 +73,8 @@ export default function Layout() {
     clear();
     navigate('/login');
   };
+
+  const visibleItems = navItems.filter((item) => !item.visible || (user && item.visible(user)));
 
   return (
     <div className="flex h-screen">
@@ -46,7 +88,7 @@ export default function Layout() {
           <span className="text-base font-semibold tracking-tight">企业知识库</span>
         </div>
         <nav className="flex-1 space-y-1 p-3">
-          {navItems.map((item) => (
+          {visibleItems.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}

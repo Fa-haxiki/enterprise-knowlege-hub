@@ -5,8 +5,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as argon2 from 'argon2';
 import { v4 as uuid } from 'uuid';
-import { ErrorCode, SystemRole } from '@ekh/shared';
+import { ErrorCode, SystemRole, UserStatus } from '@ekh/shared';
 import { UserEntity } from '../../database/entities/user.entity';
+import { DepartmentAdminEntity } from '../../database/entities/department-admin.entity';
 import { RedisService } from '../../redis/redis.service';
 import { AuditService } from '../audit/audit.service';
 import { BizException } from '../../common/filters/http-exception.filter';
@@ -22,12 +23,15 @@ export class AuthService {
   constructor(
     @InjectRepository(UserEntity)
     private readonly users: Repository<UserEntity>,
+    @InjectRepository(DepartmentAdminEntity)
+    private readonly deptAdmins: Repository<DepartmentAdminEntity>,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly redis: RedisService,
     private readonly audit: AuditService,
   ) {}
 
+  /** 注册申请制：创建 PENDING 账号，不签发 token，待 sysadmin 审核通过后方可登录 */
   async register(email: string, password: string, name: string) {
     const exists = await this.users.findOne({ where: { email } });
     if (exists) throw new BizException(ErrorCode.CONFLICT, '邮箱已注册', 409);
@@ -37,10 +41,11 @@ export class AuthService {
       name,
       passwordHash: await argon2.hash(password),
       role: SystemRole.MEMBER,
+      status: UserStatus.PENDING,
     });
     await this.users.save(user);
     this.audit.record({ userId: user.id, action: 'register', resourceType: 'user', resourceId: user.id });
-    return this.issueTokens(user);
+    return { pending: true as const, message: '注册申请已提交，请等待管理员审核' };
   }
 
   async login(email: string, password: string, ip?: string) {
@@ -49,6 +54,14 @@ export class AuthService {
     if (locked) throw new BizException(ErrorCode.ACCOUNT_LOCKED, '账号已锁定，请 15 分钟后重试', 401);
 
     const user = await this.users.findOne({ where: { email } });
+    // 审核状态优先于密码校验：避免泄露"账号存在但密码错误"的信息
+    if (user && user.status === UserStatus.PENDING) {
+      throw new BizException(ErrorCode.ACCOUNT_PENDING, '账号正在审核中，请耐心等待', 401);
+    }
+    if (user && user.status === UserStatus.REJECTED) {
+      const note = user.reviewNote ? `：${user.reviewNote}` : '';
+      throw new BizException(ErrorCode.ACCOUNT_REJECTED, `注册申请未通过${note}`, 401);
+    }
     const valid = user && !user.disabledAt && (await argon2.verify(user.passwordHash, password));
     if (!valid) {
       const failKey = `auth:fail:${email}`;
@@ -90,7 +103,7 @@ export class AuthService {
     if (!alive) throw new BizException(ErrorCode.TOKEN_INVALID, 'Refresh Token 已吊销', 401);
 
     const user = await this.users.findOne({ where: { id: payload.sub } });
-    if (!user || user.disabledAt) {
+    if (!user || user.disabledAt || user.status !== UserStatus.ACTIVE) {
       throw new BizException(ErrorCode.TOKEN_INVALID, '用户不存在或已禁用', 401);
     }
 
@@ -125,11 +138,12 @@ export class AuthService {
     );
     await this.redis.raw.set(this.refreshKey(user.id, jti), '1', 'EX', refreshTtl);
 
+    const isDeptAdmin = await this.deptAdmins.exist({ where: { userId: user.id } });
     return {
       access_token: accessToken,
       refresh_token: refreshToken,
       expires_in: accessTtl,
-      user: { id: user.id, email: user.email, name: user.name, role: user.role },
+      user: { id: user.id, email: user.email, name: user.name, role: user.role, is_dept_admin: isDeptAdmin },
     };
   }
 

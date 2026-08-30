@@ -10,6 +10,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { IsBoolean, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
 import { WorkspaceRole } from '@ekh/shared';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser, type AuthUser } from '../../common/decorators/current-user.decorator';
@@ -17,6 +18,17 @@ import { AclGuard, RequireWorkspaceRole } from '../workspaces/guards/acl.guard';
 import { AuditService } from '../audit/audit.service';
 import { DocumentsService } from './documents.service';
 import { UploadCompleteDto, UploadInitDto } from './dto/document.dto';
+
+class ReviewDocumentDto {
+  @IsBoolean()
+  approve: boolean;
+
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(500)
+  reason?: string;
+}
 
 @ApiTags('documents')
 @UseGuards(JwtAuthGuard)
@@ -26,6 +38,30 @@ export class DocumentsController {
     private readonly documents: DocumentsService,
     private readonly audit: AuditService,
   ) {}
+
+  /** 待审核列表（审核员/sysadmin）；须在 documents/:id 之前注册避免被 :id 吞掉 */
+  @Get('documents/pending-review')
+  pendingReview(@CurrentUser() user: AuthUser) {
+    return this.documents.pendingReviewList(user);
+  }
+
+  /** 文档审核：通过入队解析 / 拒绝标记理由（service 内校验审核员权限） */
+  @Post('documents/:id/review')
+  async review(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+    @Body() dto: ReviewDocumentDto,
+  ) {
+    const result = await this.documents.review(user, id, dto.approve, dto.reason);
+    this.audit.record({
+      userId: user.userId,
+      action: 'document_review',
+      resourceType: 'document',
+      resourceId: id,
+      detail: { approve: dto.approve, reason: dto.reason ?? null },
+    });
+    return result;
+  }
 
   @Post('workspaces/:workspaceId/documents/upload-init')
   @UseGuards(AclGuard)
@@ -70,16 +106,12 @@ export class DocumentsController {
 
   @Get('documents/:id')
   detail(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthUser) {
-    return this.documents.assertRole(user.userId, id, WorkspaceRole.VIEWER).then(() =>
-      this.documents.detail(id),
-    );
+    return this.documents.assertViewable(user, id).then(() => this.documents.detail(id));
   }
 
   @Get('documents/:id/download-url')
   downloadUrl(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthUser) {
-    return this.documents.assertRole(user.userId, id, WorkspaceRole.VIEWER).then(() =>
-      this.documents.downloadUrl(id),
-    );
+    return this.documents.assertViewable(user, id).then(() => this.documents.downloadUrl(id));
   }
 
   @Get('documents/:id/progress')

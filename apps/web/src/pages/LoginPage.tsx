@@ -9,6 +9,7 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(false);
   const setTokens = useAuthStore((s) => s.setTokens);
   const navigate = useNavigate();
@@ -16,18 +17,24 @@ export default function LoginPage() {
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setError('');
+    setNotice('');
     setLoading(true);
     try {
-      const data =
-        mode === 'login'
-          ? await api.post<{ access_token: string; refresh_token: string; user: never }>(
-              '/auth/login',
-              { email, password },
-            )
-          : await api.post<{ access_token: string; refresh_token: string; user: never }>(
-              '/auth/register',
-              { email, password, name },
-            );
+      if (mode === 'register') {
+        // 申请制：注册不签发 token，等待管理员审核
+        const res = await api.post<{ pending: boolean; message: string }>(
+          '/auth/register',
+          { email, password, name },
+        );
+        setNotice(res.message);
+        setMode('login');
+        setPassword('');
+        return;
+      }
+      const data = await api.post<{ access_token: string; refresh_token: string; user: never }>(
+        '/auth/login',
+        { email, password },
+      );
       setTokens(data.access_token, data.refresh_token, data.user);
       navigate('/chat');
     } catch (err) {
@@ -79,7 +86,7 @@ export default function LoginPage() {
             {mode === 'login' ? '欢迎回来' : '创建账号'}
           </h2>
           <p className="mb-6 mt-1 text-sm text-ink-400">
-            {mode === 'login' ? '登录以继续使用智能问答' : '注册后即可开始使用'}
+            {mode === 'login' ? '登录以继续使用智能问答' : '提交申请，管理员审核通过后开通'}
           </p>
           <form onSubmit={submit} className="space-y-3.5">
             {mode === 'register' && (
@@ -108,6 +115,11 @@ export default function LoginPage() {
               minLength={8}
               required
             />
+            {notice && (
+              <p className="rounded-lg bg-emerald-500/10 px-3 py-2 text-sm text-emerald-600 dark:text-emerald-400">
+                {notice}
+              </p>
+            )}
             {error && (
               <p className="rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
                 {error}
@@ -118,14 +130,14 @@ export default function LoginPage() {
               disabled={loading}
               className="w-full rounded-lg bg-brand-600 py-2.5 text-sm font-medium text-white shadow-sm transition-colors hover:bg-brand-700 disabled:opacity-50"
             >
-              {loading ? '请稍候…' : mode === 'login' ? '登录' : '注册'}
+              {loading ? '请稍候…' : mode === 'login' ? '登录' : '提交申请'}
             </button>
           </form>
           <button
             onClick={() => setMode(mode === 'login' ? 'register' : 'login')}
             className="mt-5 w-full text-center text-xs text-ink-400 transition-colors hover:text-brand-600"
           >
-            {mode === 'login' ? '没有账号？注册' : '已有账号？登录'}
+            {mode === 'login' ? '没有账号？申请注册' : '已有账号？登录'}
           </button>
         </div>
       </div>

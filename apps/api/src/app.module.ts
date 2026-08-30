@@ -20,6 +20,8 @@ import { ChatModule } from './modules/chat/chat.module';
 import { LlmModule } from './modules/llm/llm.module';
 import { ObservabilityModule } from './modules/observability/observability.module';
 import { AuditModule } from './modules/audit/audit.module';
+import { AdminModule } from './modules/admin/admin.module';
+import { DepartmentsModule } from './modules/departments/departments.module';
 import { TtsModule } from './modules/tts/tts.module';
 import { HealthModule } from './modules/health/health.module';
 import { RedisModule } from './redis/redis.module';
@@ -77,6 +79,8 @@ import { IngestionJobEntity } from './database/entities/ingestion-job.entity';
     LlmModule,
     ObservabilityModule,
     AuditModule,
+    AdminModule,
+    DepartmentsModule,
     TtsModule,
     HealthModule,
     SecurityModule,
