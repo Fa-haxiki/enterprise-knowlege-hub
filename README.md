@@ -98,18 +98,19 @@ cp .env.example .env
 # 2. 安装依赖
 pnpm install
 
-# 3. 启动基础设施（PG/Redis/ES/Neo4j/MinIO；MinerU 与 LangFuse 见部署文档）
-docker compose up -d postgres redis elasticsearch neo4j minio
+# 3. 一键启动全部服务（Docker 中间件 + API + Worker + Web）
+pnpm dev:up
 
-# 4. 构建并启动应用（三个终端）
-pnpm build
-pnpm dev:api      # API:      http://localhost:8080/api/docs
-pnpm dev:worker   # 入库 Worker（文档解析/向量化/建图）
-pnpm dev:web      # Web:      http://localhost:5173
-
-# 5. 创建首个系统管理员
+# 4. 创建首个系统管理员（首次）
 pnpm seed:admin   # 账号见 .env 的 ADMIN_EMAIL / ADMIN_PASSWORD
+
+# 5. 停止全部服务
+pnpm dev:down
 ```
+
+`dev:up` 自动完成：docker compose 全组件启动 → 等待 PG/ES/Neo4j 就绪 → dist 缺失时自动构建 → 后台拉起 API/Worker/Web。日志在 `logs/{api,worker,web}.log`，已运行的服务自动跳过。
+
+如需前台调试单个服务，仍可分别使用 `pnpm dev:api` / `pnpm dev:worker` / `pnpm dev:web`。
 
 数据库表结构由 TypeORM 启动时自动同步，pgvector 扩展与 HNSW 索引自动幂等创建，无需手动 migration。
 

@@ -1,5 +1,12 @@
 # 工具链与构建坑点
 
+## 脚本内 nohup 后台进程被托管终端连带清理
+
+- **现象**：`dev-up.sh` 用 `(nohup node ... &)` 启动的服务，日志显示启动成功，但脚本退出后进程全部消失，端口无监听
+- **根因**：IDE 托管终端在命令结束后按进程组清理子进程树；`nohup`/`disown` 只防 SIGHUP，挡不住进程组级 SIGKILL
+- **修复**：`scripts/spawn-daemon.py` 用 `fork + setsid` 让服务脱离终端会话，PID 写入 `.pids/`；macOS 无 setsid 命令，需 Python 实现
+- **相关**：`scripts/dev-up.sh`、`scripts/spawn-daemon.py`
+
 ## pnpm install 失败：私有 registry 不可达
 
 - **现象**：`GET http://npm.kf315.net/@pnpm%2Fexe: fetch failed`，install 直接失败
