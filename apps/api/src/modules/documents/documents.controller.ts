@@ -78,9 +78,13 @@ export class DocumentsController {
   }
 
   @Post('documents/:id/reindex')
-  reindex(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthUser) {
+  reindex(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user: AuthUser,
+    @Query('from_stage') fromStage?: 'parse' | 'chunk' | 'index' | 'graph',
+  ) {
     return this.documents.assertRole(user.userId, id, WorkspaceRole.EDITOR).then(() =>
-      this.documents.reindex(id),
+      this.documents.reindex(id, fromStage),
     );
   }
 

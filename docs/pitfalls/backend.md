@@ -1,5 +1,13 @@
 # NestJS 后端坑点
 
+## Neo4j Cypher：WITH 引用未在作用域的变量
+
+- **现象**：入库建图阶段降级 `Variable 'c' not defined`，文档 READY 但图谱无数据
+- **根因**：`MERGE (n:Type {...}) WITH c, n MERGE (c)-[:MENTIONS]->(n)` —— `c` 是上一个独立 `session.run` 的变量，Cypher 变量不跨语句传递
+- **修复**：同一语句内先 `MATCH (c:Chunk {chunk_id: $chunkId})` 再 MERGE 实体与关系
+- **教训**：图谱写入失败只记 WARN（degraded 不阻断入库），排查时先看 worker 日志而非文档状态
+- **相关**：`apps/api/src/modules/graph/graph.service.ts` upsertGraph
+
 ## ConfigModule 找不到 monorepo 根目录的 .env
 
 - **现象**：TypeORM 报 `password authentication failed`，实际是环境变量为空

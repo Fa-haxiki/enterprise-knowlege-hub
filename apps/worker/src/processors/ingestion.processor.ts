@@ -49,7 +49,7 @@ export class IngestionProcessor extends WorkerHost {
   }
 
   async process(job: Job<IngestionJobData>): Promise<void> {
-    const { documentId } = job.data;
+    const { documentId, fromStage } = job.data;
     const doc = await this.documents.findOne({ where: { id: documentId } });
     if (!doc) {
       this.logger.warn(`document ${documentId} not found, skip`);
@@ -59,6 +59,12 @@ export class IngestionProcessor extends WorkerHost {
     // 软删除文档：清理索引与图数据
     if (doc.deletedAt) {
       await this.purge(doc);
+      return;
+    }
+
+    // 仅重建图谱：跳过解析/分块/索引，基于已有分片重跑实体抽取
+    if (fromStage === 'graph') {
+      await this.rebuildGraphOnly(doc);
       return;
     }
 
@@ -156,6 +162,31 @@ export class IngestionProcessor extends WorkerHost {
         relations: result.relations,
       });
     }
+  }
+
+  /** 仅重建图谱：用已落库的分片重跑实体抽取（不清空索引） */
+  private async rebuildGraphOnly(doc: DocumentEntity) {
+    await this.transition(doc, DocumentStatus.GRAPHING, 85);
+    try {
+      const saved = await this.chunks.find({ where: { documentId: doc.id }, order: { chunkIndex: 'ASC' } });
+      for (const chunk of saved) {
+        const result = await this.extractor.extract(chunk.content);
+        if (result.entities.length === 0 && result.relations.length === 0) continue;
+        await this.graphDb.upsertGraph({
+          chunkId: chunk.id,
+          documentId: doc.id,
+          workspaceId: doc.workspaceId,
+          entities: result.entities,
+          relations: result.relations,
+        });
+      }
+      await this.trackJob(doc.id, IngestionStage.GRAPH, JobStatus.DONE);
+      this.logger.log(`document ${doc.id} graph rebuilt: ${saved.length} chunks`);
+    } catch (e) {
+      this.logger.warn(`graph rebuild degraded: ${(e as Error).message}`);
+      await this.trackJob(doc.id, IngestionStage.GRAPH, JobStatus.FAILED, (e as Error).message);
+    }
+    await this.transition(doc, DocumentStatus.READY, 100);
   }
 
   /** 软删除清理：chunk / ES / Neo4j / MinIO */

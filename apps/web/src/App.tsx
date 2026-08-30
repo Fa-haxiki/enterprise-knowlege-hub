@@ -29,6 +29,7 @@ export default function App() {
         <Route path="chat/:conversationId" element={<ChatPage />} />
         <Route path="workspaces" element={<WorkspacesPage />} />
         <Route path="workspaces/:workspaceId/documents" element={<DocumentsPage />} />
+        <Route path="*" element={<Navigate to="/chat" replace />} />
       </Route>
     </Routes>
   );

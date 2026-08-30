@@ -86,4 +86,6 @@ export interface ChunkHit {
   rrf_score?: number;
   /** Reranker 分 */
   rerank_score?: number;
+  /** 是否由图谱实体反查补充（图增强检索） */
+  via_graph?: boolean;
 }

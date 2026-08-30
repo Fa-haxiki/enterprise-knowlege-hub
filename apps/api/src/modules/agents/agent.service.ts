@@ -9,7 +9,7 @@ import { RetrievalService } from '../retrieval/retrieval.service';
 import { MemoryService } from '../memory/memory.service';
 import { GraphService } from '../graph/graph.service';
 import { LlmService } from '../llm/llm.service';
-import { LangfuseService } from '../observability/langfuse.service';
+import { LangfuseService, type TraceHandle } from '../observability/langfuse.service';
 import { AgentStateAnnotation, type AgentCallbacks, type AgentState } from './agent.state';
 
 const NODE_TIMEOUTS: Record<string, number> = {
@@ -37,7 +37,7 @@ export class AgentService {
     this.graph = this.buildGraph();
   }
 
-  /** 执行问答全链路，callbacks 用于 SSE 流式推送 */
+  /** 执行问答全链路，callbacks 用于 SSE 流式推送；返回 state 与 LangFuse traceId */
   async run(
     input: {
       query: string;
@@ -47,7 +47,7 @@ export class AgentService {
       enableGraph: boolean;
     },
     callbacks: AgentCallbacks,
-  ): Promise<AgentState> {
+  ): Promise<{ state: AgentState; traceId: string | null }> {
     const trace = this.langfuse.createTrace('chat_completion', {
       userId: input.userId,
       conversationId: input.conversationId,
@@ -66,9 +66,15 @@ export class AgentService {
 
     trace?.update({
       output: result.answer.slice(0, 500),
-      metadata: { degraded: result.degraded, nodeLatencies: result.nodeLatencies },
+      metadata: {
+        complexity: result.complexity,
+        degraded: result.degraded,
+        nodeLatencies: result.nodeLatencies,
+        recalledChunkIds: result.rerankedChunks.map((c) => c.chunk_id),
+        graphTriples: result.graphTriples.length,
+      },
     });
-    return result;
+    return { state: result, traceId: trace?.id ?? null };
   }
 
   private buildGraph() {
@@ -97,7 +103,7 @@ export class AgentService {
     return g.compile();
   }
 
-  /** 节点包装：耗时记录 + 超时降级 */
+  /** 节点包装：耗时记录 + 超时降级 + LangFuse span 埋点 */
   private wrap(
     name: string,
     fn: (state: AgentState, config: RunnableConfig) => Promise<Partial<AgentState>>,
@@ -105,16 +111,66 @@ export class AgentService {
     return async (state: AgentState, config: RunnableConfig): Promise<Partial<AgentState>> => {
       const t0 = Date.now();
       const timeout = NODE_TIMEOUTS[name];
+      // llm_generate 使用 generation 埋点（含 token usage），不再重复建 span
+      const span =
+        name === 'llm_generate'
+          ? null
+          : this.langfuse.createSpan(this.traceOf(config), name, this.spanInput(name, state));
       try {
         const result = timeout
           ? await this.withTimeout(fn(state, config), timeout)
           : await fn(state, config);
+        this.langfuse.endSpan(span, this.spanOutput(name, result));
         return { ...result, nodeLatencies: { [name]: Date.now() - t0 } };
       } catch (e) {
+        this.langfuse.endSpan(span, {}, e as Error);
         this.logger.warn(`node ${name} degraded: ${(e as Error).message}`);
         return { degraded: [name], nodeLatencies: { [name]: Date.now() - t0 } };
       }
     };
+  }
+
+  private traceOf(config: RunnableConfig): TraceHandle | null {
+    return (config.configurable as { trace?: TraceHandle | null })?.trace ?? null;
+  }
+
+  /** span 输入摘要：只记录对排障有用的字段，避免大 payload */
+  private spanInput(name: string, state: AgentState): Record<string, unknown> {
+    switch (name) {
+      case 'acl_guard':
+        return { userId: state.userId, workspaceId: state.workspaceId };
+      case 'query_rewrite':
+        return { query: state.query, windowSize: state.windowMessages.length };
+      case 'complexity_router':
+        return { rewrittenQuery: state.rewrittenQuery };
+      case 'hybrid_retrieve':
+        return { rewrittenQuery: state.rewrittenQuery, aclCount: state.aclWhitelist.length };
+      case 'graph_reason':
+        return { entities: state.routerEntities };
+      case 'memory_load':
+        return { conversationId: state.conversationId };
+      default:
+        return {};
+    }
+  }
+
+  /** span 输出摘要：召回分片 ID 落 span，支持 LangFuse 回放 */
+  private spanOutput(name: string, result: Partial<AgentState>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    if (result.complexity) out.complexity = result.complexity;
+    if (result.routerEntities) out.entities = result.routerEntities;
+    if (result.rewrittenQuery) out.rewrittenQuery = result.rewrittenQuery;
+    if (result.rerankedChunks) {
+      out.chunks = result.rerankedChunks.map((c) => ({
+        chunk_id: c.chunk_id,
+        rerank_score: c.rerank_score,
+        via_graph: c.via_graph ?? false,
+      }));
+    }
+    if (result.graphTriples) out.graphTriples = result.graphTriples;
+    if (result.longTermMemories) out.longTermMemories = result.longTermMemories;
+    if (result.degraded) out.degraded = result.degraded;
+    return out;
   }
 
   private withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
@@ -223,7 +279,7 @@ export class AgentService {
     return { rerankedChunks: chunks, degraded, nodeLatencies: latencies };
   }
 
-  /** step3: 图谱多跳推理（仅 complex 路径） */
+  /** step3+4: 图谱多跳推理 + 图增强检索（仅 complex 路径） */
   private async graphReason(
     state: AgentState,
     config: RunnableConfig,
@@ -239,7 +295,25 @@ export class AgentService {
     const triples = await this.graphDb.multiHop(aligned, maxHops);
     this.callbacksOf(config)?.onStatus('graph', `图谱推理路径 ${triples.length} 条`);
     if (triples.length > 0) this.callbacksOf(config)?.onGraphPath(triples);
-    return { graphTriples: triples };
+
+    // 图增强检索：推理链路涉及的实体反查 MENTIONS 分片，合并进候选（去重，上限 topN+4）
+    const entityNames = [
+      ...new Set([...aligned.map((e) => e.name), ...triples.flatMap((t) => [t[0], t[2]])]),
+    ];
+    const chunkIds = await this.graphDb.chunksByEntities(entityNames, state.aclWhitelist, 8);
+    if (chunkIds.length === 0) return { graphTriples: triples };
+
+    const graphChunks = await this.retrieval.chunksByIds(chunkIds, state.aclWhitelist);
+    const existing = new Set(state.rerankedChunks.map((c) => c.chunk_id));
+    const appended = graphChunks.filter((c) => !existing.has(c.chunk_id));
+    if (appended.length === 0) return { graphTriples: triples };
+
+    const topN = this.config.get<number>('rag.rerankTopN') ?? 6;
+    this.callbacksOf(config)?.onStatus('graph', `图谱补充召回 ${appended.length} 条分片`);
+    return {
+      graphTriples: triples,
+      rerankedChunks: [...state.rerankedChunks, ...appended].slice(0, topN + 4),
+    };
   }
 
   /** step5: 长期记忆（Mem0） */
@@ -296,7 +370,7 @@ export class AgentService {
     };
   }
 
-  /** step7: LLM 流式生成 + 引用对齐 */
+  /** step7: LLM 流式生成 + 引用对齐 + generation 埋点 */
   private async llmGenerate(
     state: AgentState,
     config: RunnableConfig,
@@ -307,12 +381,22 @@ export class AgentService {
         ? state.promptMessages
         : [new HumanMessage(state.rewrittenQuery)];
 
+    const generation = this.langfuse.createGeneration(this.traceOf(config), {
+      name: 'llm_generate',
+      model: this.config.get<string>('llm.model') ?? 'unknown',
+      input: messages.map((m) => ({
+        role: m._getType(),
+        content: String(m.content).slice(0, 2000),
+      })),
+    });
+
     let answer = '';
     const { iterator, usage } = this.llm.streamChat(messages);
     for await (const delta of iterator) {
       answer += delta;
       callbacks?.onToken(delta);
     }
+    this.langfuse.endGeneration(generation, { output: answer.slice(0, 2000), usage });
 
     // 引用对齐：提取 [n] 角标 → citation
     const citations: Citation[] = [];

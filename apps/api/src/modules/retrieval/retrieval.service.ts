@@ -114,6 +114,29 @@ export class RetrievalService {
     }));
   }
 
+  /** 按 chunk_id 批量拉取分片（图增强检索反查用），ACL 过滤 + 软删除排除 */
+  async chunksByIds(chunkIds: string[], aclWhitelist: string[]): Promise<ChunkHit[]> {
+    if (chunkIds.length === 0 || aclWhitelist.length === 0) return [];
+    const rows = await this.dataSource.query(
+      `SELECT c.id AS chunk_id, c.document_id, c.workspace_id, c.content,
+              c.heading_path, c.refs, d.title
+       FROM document_chunks c
+       JOIN documents d ON d.id = c.document_id
+       WHERE c.id = ANY($1) AND c.workspace_id = ANY($2) AND d.deleted_at IS NULL`,
+      [chunkIds, aclWhitelist],
+    );
+    return rows.map((r: Record<string, unknown>) => ({
+      chunk_id: r.chunk_id as string,
+      document_id: r.document_id as string,
+      workspace_id: r.workspace_id as string,
+      title: r.title as string,
+      content: r.content as string,
+      heading_path: (r.heading_path as string[]) ?? [],
+      page: (r.refs as { page?: number })?.page,
+      via_graph: true,
+    }));
+  }
+
   /** RRF 融合：score = Σ 1/(k + rank) */
   private rrfFuse(lists: ChunkHit[][], k: number): ChunkHit[] {
     const scores = new Map<string, { hit: ChunkHit; score: number }>();

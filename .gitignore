@@ -10,3 +10,4 @@ coverage/
 *.tsbuildinfo
 uploads/
 data/
+test-docs/
