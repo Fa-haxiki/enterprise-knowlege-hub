@@ -7,6 +7,7 @@ import { AuthModule } from '../auth/auth.module';
 import { AgentsModule } from '../agents/agents.module';
 import { MemoryModule } from '../memory/memory.module';
 import { ChatController } from './chat.controller';
+import { AguiController } from './agui.controller';
 import { ChatService } from './chat.service';
 
 @Module({
@@ -16,7 +17,7 @@ import { ChatService } from './chat.service';
     AgentsModule,
     MemoryModule,
   ],
-  controllers: [ChatController],
+  controllers: [ChatController, AguiController],
   providers: [ChatService],
 })
 export class ChatModule {}

@@ -1,0 +1,49 @@
+import type { AgentStep, Citation, Triple } from '@/lib/agui';
+
+export type { AgentStep, Citation, Triple };
+
+export interface Message {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  citations?: Citation[];
+  feedback?: number;
+  streaming?: boolean;
+  steps?: AgentStep[];
+  triples?: Triple[];
+  complexity?: 'simple' | 'complex' | null;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  updated_at: string;
+}
+
+/** LangGraph 节点 → 步骤条中文标签 */
+export const STEP_LABELS: Record<string, string> = {
+  acl_guard: '权限校验',
+  load_window: '加载对话',
+  query_rewrite: '问题改写',
+  complexity_router: '复杂度判断',
+  hybrid_retrieve: '混合检索',
+  graph_reason: '图谱推理',
+  memory_load: '记忆加载',
+  prompt_build: '构建提示词',
+  llm_generate: '生成回答',
+};
+
+/** 与后端 splitSentences 保持一致的切分（保留供后续按句高亮等场景复用） */
+export function splitSentences(text: string): string[] {
+  const raw = text.match(/[^。！？!?；;\n]+[。！？!?；;\n]?/g) ?? [];
+  const sentences: string[] = [];
+  for (const piece of raw.map((s) => s.trim()).filter(Boolean)) {
+    const last = sentences[sentences.length - 1];
+    if (last !== undefined && last.length < 6) {
+      sentences[sentences.length - 1] = last + piece;
+    } else {
+      sentences.push(piece);
+    }
+  }
+  return sentences;
+}

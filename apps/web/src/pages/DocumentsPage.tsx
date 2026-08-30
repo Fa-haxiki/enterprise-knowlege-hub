@@ -1,7 +1,6 @@
-import { ChangeEvent, useEffect, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent, useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api, ApiError } from '@/lib/api';
-import { useAuthStore } from '@/store/auth';
 
 interface DocumentItem {
   id: string;
@@ -13,13 +12,13 @@ interface DocumentItem {
 }
 
 const STATUS_LABEL: Record<string, { label: string; className: string }> = {
-  UPLOADED: { label: '待解析', className: 'bg-slate-100 text-slate-600' },
-  PARSING: { label: '解析中', className: 'bg-blue-50 text-blue-600' },
-  CHUNKING: { label: '分块中', className: 'bg-blue-50 text-blue-600' },
-  INDEXING: { label: '索引中', className: 'bg-blue-50 text-blue-600' },
-  GRAPHING: { label: '建图中', className: 'bg-blue-50 text-blue-600' },
-  READY: { label: '可检索', className: 'bg-green-50 text-green-600' },
-  FAILED: { label: '失败', className: 'bg-red-50 text-red-600' },
+  UPLOADED: { label: '待解析', className: 'bg-subtle text-ink-600' },
+  PARSING: { label: '解析中', className: 'bg-blue-500/10 text-blue-600 dark:text-blue-400' },
+  CHUNKING: { label: '分块中', className: 'bg-blue-500/10 text-blue-600 dark:text-blue-400' },
+  INDEXING: { label: '索引中', className: 'bg-blue-500/10 text-blue-600 dark:text-blue-400' },
+  GRAPHING: { label: '建图中', className: 'bg-violet-500/10 text-violet-600 dark:text-violet-400' },
+  READY: { label: '可检索', className: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' },
+  FAILED: { label: '失败', className: 'bg-red-500/10 text-red-600 dark:text-red-400' },
 };
 
 const PROCESSING = new Set(['UPLOADED', 'PARSING', 'CHUNKING', 'INDEXING', 'GRAPHING']);
@@ -27,11 +26,12 @@ const PROCESSING = new Set(['UPLOADED', 'PARSING', 'CHUNKING', 'INDEXING', 'GRAP
 export default function DocumentsPage() {
   const { workspaceId } = useParams<{ workspaceId: string }>();
   const [docs, setDocs] = useState<DocumentItem[]>([]);
+  const [loading, setLoading] = useState(true);
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState('');
   const fileInput = useRef<HTMLInputElement>(null);
-  const accessToken = useAuthStore((s) => s.accessToken);
 
   const load = async () => {
     if (!workspaceId) return;
@@ -42,6 +42,8 @@ export default function DocumentsPage() {
       setDocs(data.items);
     } catch {
       setDocs([]);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -69,9 +71,8 @@ export default function DocumentsPage() {
     return () => clearInterval(timer);
   }, [docs]);
 
-  const upload = async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !workspaceId) return;
+  const doUpload = async (file: File) => {
+    if (!workspaceId || uploading) return;
     setUploading(true);
     setError('');
     try {
@@ -108,6 +109,18 @@ export default function DocumentsPage() {
     }
   };
 
+  const upload = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) await doUpload(file);
+  };
+
+  const onDrop = async (e: DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) await doUpload(file);
+  };
+
   const remove = async (id: string) => {
     if (!confirm('确认删除该文档？其分片、索引与图谱数据将被清理。')) return;
     await api.delete(`/documents/${id}`);
@@ -117,80 +130,115 @@ export default function DocumentsPage() {
   return (
     <div className="h-full overflow-y-auto p-6">
       <div className="mx-auto max-w-4xl">
-        <div className="mb-4 flex items-center justify-between">
-          <h1 className="text-lg font-semibold">文档管理</h1>
-          <div>
-            <input ref={fileInput} type="file" className="hidden" onChange={upload}
-              accept=".pdf,.docx,.xlsx,.pptx,.md,.txt,.html" />
-            <button
-              onClick={() => fileInput.current?.click()}
-              disabled={uploading}
-              className="rounded-md bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-800 disabled:opacity-50"
-            >
-              {uploading ? '上传中…' : '上传文档'}
-            </button>
-          </div>
+        <div className="mb-5">
+          <h1 className="text-lg font-semibold text-ink-900">文档管理</h1>
+          <p className="mt-1 text-sm text-ink-400">上传后自动解析、分块、索引并构建知识图谱</p>
         </div>
-        {error && <p className="mb-4 text-sm text-red-600">{error}</p>}
+        {error && (
+          <p className="mb-4 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
+            {error}
+          </p>
+        )}
 
-        <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-          <table className="w-full text-sm">
-            <thead className="bg-slate-50 text-left text-xs text-slate-500">
-              <tr>
-                <th className="px-4 py-3">文档</th>
-                <th className="w-28 px-4 py-3">大小</th>
-                <th className="w-40 px-4 py-3">状态</th>
-                <th className="w-24 px-4 py-3"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {docs.map((doc) => {
-                const st = STATUS_LABEL[doc.status] ?? STATUS_LABEL.UPLOADED;
-                return (
-                  <tr key={doc.id}>
-                    <td className="px-4 py-3">
-                      <div className="font-medium">{doc.title}</div>
-                      {doc.error_msg && (
-                        <div className="mt-0.5 text-xs text-red-500">{doc.error_msg}</div>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-slate-500">
-                      {(doc.file_size / 1024 / 1024).toFixed(1)} MB
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`rounded-full px-2.5 py-1 text-xs ${st.className}`}>
-                        {st.label}
-                      </span>
-                      {PROCESSING.has(doc.status) && progress[doc.id] != null && (
-                        <div className="mt-1.5 h-1 w-28 overflow-hidden rounded bg-slate-100">
-                          <div
-                            className="h-full bg-blue-500 transition-all"
-                            style={{ width: `${progress[doc.id]}%` }}
-                          />
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => remove(doc.id)}
-                        className="text-xs text-slate-400 hover:text-red-600"
-                      >
-                        删除
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
-              {docs.length === 0 && (
-                <tr>
-                  <td colSpan={4} className="py-12 text-center text-slate-400">
-                    暂无文档，上传后自动解析入库
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+        {/* 拖拽上传区 */}
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragOver(true);
+          }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={onDrop}
+          onClick={() => !uploading && fileInput.current?.click()}
+          className={`mb-5 flex cursor-pointer flex-col items-center justify-center rounded-card border-2 border-dashed px-6 py-10 transition-all ${
+            dragOver
+              ? 'border-brand-500 bg-brand-600/5 scale-[1.01]'
+              : 'border-border bg-card hover:border-brand-500/40 hover:bg-subtle/40'
+          }`}
+        >
+          <input
+            ref={fileInput}
+            type="file"
+            className="hidden"
+            onChange={upload}
+            accept=".pdf,.docx,.xlsx,.pptx,.md,.txt,.html"
+          />
+          <div
+            className={`mb-3 flex h-11 w-11 items-center justify-center rounded-xl transition-colors ${
+              dragOver ? 'bg-brand-600 text-white' : 'bg-brand-600/10 text-brand-600'
+            }`}
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <path d="m17 8-5-5-5 5" />
+              <path d="M12 3v12" />
+            </svg>
+          </div>
+          <p className="text-sm font-medium text-ink-900">
+            {uploading ? '上传中，请稍候…' : dragOver ? '松开以上传文档' : '点击或拖拽文件到此处上传'}
+          </p>
+          <p className="mt-1 text-xs text-ink-400">支持 PDF / Word / Excel / PPT / Markdown / TXT</p>
         </div>
+
+        {/* 文档列表 */}
+        {loading ? (
+          <div className="space-y-2.5">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="skeleton h-16 rounded-card" />
+            ))}
+          </div>
+        ) : docs.length === 0 ? (
+          <div className="rounded-card border border-dashed border-border py-14 text-center">
+            <p className="text-sm text-ink-400">暂无文档，上传后自动解析入库</p>
+          </div>
+        ) : (
+          <div className="space-y-2.5">
+            {docs.map((doc) => {
+              const st = STATUS_LABEL[doc.status] ?? STATUS_LABEL.UPLOADED;
+              return (
+                <div
+                  key={doc.id}
+                  className="flex items-center gap-3 rounded-card border border-border bg-card px-4 py-3 shadow-card transition-colors hover:border-brand-500/30"
+                >
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-red-500/10 text-red-500">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
+                      <path d="M14 2v6h6" />
+                    </svg>
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium text-ink-900">{doc.title}</div>
+                    <div className="mt-0.5 flex items-center gap-2 text-xs text-ink-400">
+                      <span>{(doc.file_size / 1024 / 1024).toFixed(1)} MB</span>
+                      {doc.error_msg && <span className="truncate text-red-500">{doc.error_msg}</span>}
+                    </div>
+                    {PROCESSING.has(doc.status) && progress[doc.id] != null && (
+                      <div className="mt-1.5 h-1 w-40 overflow-hidden rounded-full bg-subtle">
+                        <div
+                          className="h-full rounded-full bg-brand-500 transition-all duration-500"
+                          style={{ width: `${progress[doc.id]}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                  <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ${st.className}`}>
+                    {st.label}
+                  </span>
+                  <button
+                    onClick={() => remove(doc.id)}
+                    className="shrink-0 rounded-lg p-1.5 text-ink-400 transition-colors hover:bg-red-500/10 hover:text-red-500"
+                    title="删除文档"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 6h18" />
+                      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                    </svg>
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );

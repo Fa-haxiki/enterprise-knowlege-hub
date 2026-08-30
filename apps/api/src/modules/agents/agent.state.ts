@@ -53,4 +53,8 @@ export interface AgentCallbacks {
   onToken(delta: string): void;
   onCitation(citation: Citation): void;
   onGraphPath(triples: Triple[]): void;
+  /** 节点开始（AG-UI STEP_STARTED 映射用，可选） */
+  onStepStart?(node: string): void;
+  /** 节点结束：degraded 为 true 表示该节点超时降级（AG-UI STEP_FINISHED 映射用，可选） */
+  onStepEnd?(node: string, latencyMs: number, degraded: boolean): void;
 }

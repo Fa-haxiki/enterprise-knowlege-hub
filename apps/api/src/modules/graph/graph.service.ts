@@ -77,7 +77,8 @@ export class GraphService implements OnModuleInit, OnModuleDestroy {
          UNWIND relationships(path) AS rel
          WITH DISTINCT startNode(rel) AS s, rel, endNode(rel) AS t
          WHERE type(rel) <> 'MENTIONS'
-         RETURN coalesce(s.name, s.chunk_id) AS source, type(rel) AS relation,
+         // 按输出三元组去重：同名不同标签节点、反向重复关系都会被合并
+         RETURN DISTINCT coalesce(s.name, s.chunk_id) AS source, type(rel) AS relation,
                 coalesce(t.name, t.chunk_id) AS target
          LIMIT 30`,
         { names: entities.map((e) => e.name) },

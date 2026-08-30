@@ -111,6 +111,7 @@ export class AgentService {
     return async (state: AgentState, config: RunnableConfig): Promise<Partial<AgentState>> => {
       const t0 = Date.now();
       const timeout = NODE_TIMEOUTS[name];
+      this.callbacksOf(config)?.onStepStart?.(name);
       // llm_generate 使用 generation 埋点（含 token usage），不再重复建 span
       const span =
         name === 'llm_generate'
@@ -121,10 +122,13 @@ export class AgentService {
           ? await this.withTimeout(fn(state, config), timeout)
           : await fn(state, config);
         this.langfuse.endSpan(span, this.spanOutput(name, result));
-        return { ...result, nodeLatencies: { [name]: Date.now() - t0 } };
+        const latency = Date.now() - t0;
+        this.callbacksOf(config)?.onStepEnd?.(name, latency, false);
+        return { ...result, nodeLatencies: { [name]: latency } };
       } catch (e) {
         this.langfuse.endSpan(span, {}, e as Error);
         this.logger.warn(`node ${name} degraded: ${(e as Error).message}`);
+        this.callbacksOf(config)?.onStepEnd?.(name, Date.now() - t0, true);
         return { degraded: [name], nodeLatencies: { [name]: Date.now() - t0 } };
       }
     };

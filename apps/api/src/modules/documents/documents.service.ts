@@ -86,7 +86,9 @@ export class DocumentsService {
 
   async downloadUrl(documentId: string) {
     const doc = await this.mustGet(documentId);
-    return { url: await this.storage.presignDownload(doc.fileKey) };
+    // 可预览类型（PDF/文本）inline 打开，其余 attachment 下载
+    const url = await this.storage.presignDownload(doc.fileKey, 3600, doc.title, doc.mimeType);
+    return { url, previewable: StorageService.INLINE_MIME.has(doc.mimeType), title: doc.title };
   }
 
   async progress(documentId: string) {
