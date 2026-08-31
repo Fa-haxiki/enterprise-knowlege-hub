@@ -3,6 +3,8 @@ export default () => ({
     nodeEnv: process.env.NODE_ENV ?? 'development',
     port: parseInt(process.env.API_PORT ?? '8080', 10),
     corsOrigin: process.env.CORS_ORIGIN ?? 'http://localhost:5173',
+    // 全局限流：次/分/IP（压测时调大）
+    throttleLimit: parseInt(process.env.THROTTLE_LIMIT ?? '120', 10),
   },
   jwt: {
     secret: process.env.JWT_SECRET ?? 'dev-secret-change-me',
@@ -43,17 +45,20 @@ export default () => ({
     routerModel: process.env.LLM_ROUTER_MODEL ?? process.env.LLM_MODEL ?? 'deepseek-chat',
   },
   embedding: {
-    baseURL: process.env.EMBEDDING_BASE_URL ?? 'http://localhost:8001/v1',
-    apiKey: process.env.EMBEDDING_API_KEY ?? 'none',
-    model: process.env.EMBEDDING_MODEL ?? 'bge-m3',
+    baseURL: process.env.EMBEDDING_BASE_URL ?? 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    apiKey: process.env.EMBEDDING_API_KEY ?? '',
+    model: process.env.EMBEDDING_MODEL ?? 'qwen3.7-text-embedding',
     dim: parseInt(process.env.EMBEDDING_DIM ?? '1024', 10),
   },
   reranker: {
-    url: process.env.RERANKER_URL ?? 'http://localhost:8002/rerank',
-    model: process.env.RERANKER_MODEL ?? 'bge-reranker-v2-m3',
+    url: process.env.RERANKER_URL ?? 'https://dashscope.aliyuncs.com/compatible-api/v1/reranks',
+    apiKey: process.env.RERANKER_API_KEY ?? process.env.EMBEDDING_API_KEY ?? '',
+    model: process.env.RERANKER_MODEL ?? 'qwen3-rerank',
   },
   mineru: {
-    url: process.env.MINERU_URL ?? 'http://localhost:8700',
+    url: process.env.MINERU_URL ?? 'https://mineru.net',
+    token: process.env.MINERU_TOKEN ?? '',
+    model: process.env.MINERU_MODEL ?? 'vlm',
   },
   mem0: {
     url: process.env.MEM0_URL ?? 'http://localhost:8888',
@@ -75,5 +80,14 @@ export default () => ({
     graphMaxHops: parseInt(process.env.GRAPH_MAX_HOPS ?? '3', 10),
     aclCacheTtlSeconds: parseInt(process.env.ACL_CACHE_TTL_SECONDS ?? '600', 10),
     chatRateLimitPerMin: parseInt(process.env.CHAT_RATE_LIMIT_PER_MIN ?? '20', 10),
+  },
+  security: {
+    // Prompt 注入检测：命中后拒绝进入 LLM 链路
+    injectionBlockEnabled: process.env.PROMPT_INJECTION_BLOCK !== 'false',
+    // 发往 LLM 的内容脱敏（身份证/银行卡/手机号等高敏信息）
+    llmMaskEnabled: process.env.LLM_MASK_SENSITIVE !== 'false',
+  },
+  tts: {
+    serviceUrl: process.env.TTS_SERVICE_URL ?? 'http://localhost:8750',
   },
 });

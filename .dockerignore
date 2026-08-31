@@ -1,0 +1,10 @@
+node_modules
+**/node_modules
+**/dist
+data
+backups
+logs
+.pids
+.git
+test-docs
+*.log

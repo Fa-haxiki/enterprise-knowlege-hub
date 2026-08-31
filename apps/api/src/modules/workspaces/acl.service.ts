@@ -4,6 +4,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { WorkspaceRole } from '@ekh/shared';
 import { WorkspaceMemberEntity } from '../../database/entities/workspace-member.entity';
+import { DepartmentAdminEntity } from '../../database/entities/department-admin.entity';
+import { DepartmentMemberEntity } from '../../database/entities/department-member.entity';
 import { RedisService } from '../../redis/redis.service';
 
 const whitelistKey = (userId: string) => `acl:whitelist:${userId}`;
@@ -17,6 +19,10 @@ export class AclService {
   constructor(
     @InjectRepository(WorkspaceMemberEntity)
     private readonly members: Repository<WorkspaceMemberEntity>,
+    @InjectRepository(DepartmentAdminEntity)
+    private readonly deptAdmins: Repository<DepartmentAdminEntity>,
+    @InjectRepository(DepartmentMemberEntity)
+    private readonly deptMembers: Repository<DepartmentMemberEntity>,
     private readonly redis: RedisService,
     private readonly config: ConfigService,
   ) {}
@@ -37,6 +43,26 @@ export class AclService {
   async getRole(userId: string, workspaceId: string): Promise<WorkspaceRole | null> {
     const row = await this.members.findOne({ where: { userId, workspaceId } });
     return row?.role ?? null;
+  }
+
+  /** 用户是否为指定部门的管理员 */
+  async isDepartmentAdmin(userId: string, departmentId: string): Promise<boolean> {
+    return this.deptAdmins.exist({ where: { userId, departmentId } });
+  }
+
+  /** 用户作为部门管理员的部门 id 列表 */
+  async adminDepartmentIds(userId: string): Promise<string[]> {
+    const rows = await this.deptAdmins.find({ where: { userId } });
+    return rows.map((r) => r.departmentId);
+  }
+
+  /** 用户作为成员所属的部门 id 列表（部门管理员也视为所属） */
+  async memberDepartmentIds(userId: string): Promise<string[]> {
+    const [memberRows, adminRows] = await Promise.all([
+      this.deptMembers.find({ where: { userId } }),
+      this.deptAdmins.find({ where: { userId } }),
+    ]);
+    return [...new Set([...memberRows.map((r) => r.departmentId), ...adminRows.map((r) => r.departmentId)])];
   }
 
   /** 授权变更后主动失效单用户缓存 */

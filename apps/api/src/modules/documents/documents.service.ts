@@ -1,13 +1,16 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { DocumentStatus, ErrorCode, WorkspaceRole } from '@ekh/shared';
+import { In, Repository } from 'typeorm';
+import { DocumentStatus, ErrorCode, SystemRole, WorkspaceRole } from '@ekh/shared';
 import { DocumentEntity } from '../../database/entities/document.entity';
+import { WorkspaceEntity } from '../../database/entities/workspace.entity';
 import { BizException } from '../../common/filters/http-exception.filter';
 import { RedisService } from '../../redis/redis.service';
 import { AclService } from '../workspaces/acl.service';
+import { AclAlertService } from '../audit/acl-alert.service';
 import { IngestionProducer } from '../ingestion/ingestion.producer';
 import { StorageService } from './storage.service';
+import type { AuthUser } from '../../common/decorators/current-user.decorator';
 
 const ALLOWED_MIME = new Set([
   'application/pdf',
@@ -26,10 +29,13 @@ export class DocumentsService {
   constructor(
     @InjectRepository(DocumentEntity)
     private readonly documents: Repository<DocumentEntity>,
+    @InjectRepository(WorkspaceEntity)
+    private readonly workspaces: Repository<WorkspaceEntity>,
     private readonly storage: StorageService,
     private readonly ingestion: IngestionProducer,
     private readonly acl: AclService,
     private readonly redis: RedisService,
+    private readonly alert: AclAlertService,
   ) {}
 
   async uploadInit(workspaceId: string, uploaderId: string, filename: string, fileSize: number, mimeType: string) {
@@ -62,9 +68,65 @@ export class DocumentsService {
     }
 
     await this.storage.completeMultipartUpload(doc.fileKey, partCount);
-    await this.transition(doc, DocumentStatus.PARSING);
-    await this.ingestion.enqueue({ documentId: doc.id });
-    return { document_id: doc.id, status: DocumentStatus.PARSING };
+    // 审核制：上传完成后进入待审核，由部门审核员通过后才入队解析
+    await this.transition(doc, DocumentStatus.PENDING_REVIEW);
+    return { document_id: doc.id, status: DocumentStatus.PENDING_REVIEW };
+  }
+
+  /**
+   * 文档审核：通过则入队解析，拒绝则标记 REJECTED + 理由。
+   * 审核人：文档所在空间挂靠部门的审核员；未挂部门时 sysadmin 兜底。
+   */
+  async review(user: AuthUser, documentId: string, approve: boolean, reason?: string) {
+    const doc = await this.mustGet(documentId);
+    if (doc.status !== DocumentStatus.PENDING_REVIEW) {
+      throw new BizException(ErrorCode.DOC_STATUS_INVALID, '该文档不在待审核状态', 400);
+    }
+    await this.assertReviewer(user, doc);
+
+    doc.reviewedBy = user.userId;
+    doc.reviewedAt = new Date();
+    if (approve) {
+      doc.reviewNote = null;
+      await this.transition(doc, DocumentStatus.PARSING);
+      await this.ingestion.enqueue({ documentId: doc.id });
+    } else {
+      doc.reviewNote = reason?.trim() || null;
+      await this.transition(doc, DocumentStatus.REJECTED);
+    }
+    return { document_id: doc.id, status: doc.status };
+  }
+
+  /** 待审核列表：我作为审核员的部门下的待审核文档；sysadmin 另含未挂部门的 */
+  async pendingReviewList(user: AuthUser) {
+    const departmentIds = await this.acl.adminDepartmentIds(user.userId);
+    const wsRows = await this.workspaces.find();
+    const depOf = new Map(wsRows.map((w) => [w.id, w.departmentId]));
+    const inScope = wsRows
+      .filter((w) =>
+        w.departmentId
+          ? departmentIds.includes(w.departmentId) || user.role === SystemRole.SYSADMIN
+          : user.role === SystemRole.SYSADMIN,
+      )
+      .map((w) => w.id);
+    if (inScope.length === 0) return { items: [] };
+    const items = await this.documents.find({
+      where: { workspaceId: In(inScope), status: DocumentStatus.PENDING_REVIEW, deletedAt: undefined },
+      relations: { uploader: true, workspace: true },
+      order: { createdAt: 'ASC' },
+    });
+    return {
+      items: items.map((d) => ({
+        id: d.id,
+        title: d.title,
+        mime_type: d.mimeType,
+        file_size: d.fileSize,
+        status: d.status,
+        created_at: d.createdAt,
+        workspace: { id: d.workspace.id, name: d.workspace.name, department_id: depOf.get(d.workspaceId) },
+        uploader: { id: d.uploader.id, name: d.uploader.name, email: d.uploader.email },
+      })),
+    };
   }
 
   async list(workspaceId: string, page = 1, pageSize = 20) {
@@ -74,7 +136,21 @@ export class DocumentsService {
       skip: (page - 1) * pageSize,
       take: pageSize,
     });
-    return { total, page, page_size: pageSize, items };
+    return {
+      total,
+      page,
+      page_size: pageSize,
+      items: items.map((d) => ({
+        id: d.id,
+        title: d.title,
+        status: d.status,
+        mime_type: d.mimeType,
+        file_size: Number(d.fileSize),
+        error_msg: d.errorMsg,
+        review_note: d.reviewNote,
+        created_at: d.createdAt,
+      })),
+    };
   }
 
   async detail(documentId: string) {
@@ -84,7 +160,9 @@ export class DocumentsService {
 
   async downloadUrl(documentId: string) {
     const doc = await this.mustGet(documentId);
-    return { url: await this.storage.presignDownload(doc.fileKey) };
+    // 可预览类型（PDF/文本）inline 打开，其余 attachment 下载
+    const url = await this.storage.presignDownload(doc.fileKey, 3600, doc.title, doc.mimeType);
+    return { url, previewable: StorageService.INLINE_MIME.has(doc.mimeType), title: doc.title };
   }
 
   async progress(documentId: string) {
@@ -141,8 +219,41 @@ export class DocumentsService {
     const role = await this.acl.getRole(userId, doc.workspaceId);
     const rank: Record<WorkspaceRole, number> = { viewer: 1, editor: 2, owner: 3 };
     if (!role || rank[role] < rank[minRole]) {
+      await this.alert.trackDenied({
+        userId,
+        resource: 'document',
+        detail: { document_id: documentId, role: role ?? null, required: minRole },
+      });
       throw new BizException(ErrorCode.ACL_FORBIDDEN, '无权操作该文档', 403);
     }
     return doc;
+  }
+
+  /** 查看/下载权限：空间成员、文档所属部门的审核员（审核预览需要）、sysadmin */
+  async assertViewable(user: AuthUser, documentId: string) {
+    const doc = await this.mustGet(documentId);
+    if (user.role === SystemRole.SYSADMIN) return doc;
+    const role = await this.acl.getRole(user.userId, doc.workspaceId);
+    if (role) return doc;
+    if (await this.isDocReviewer(user.userId, doc)) return doc;
+    await this.alert.trackDenied({
+      userId: user.userId,
+      resource: 'document',
+      detail: { document_id: documentId, role: null, required: 'viewer|reviewer' },
+    });
+    throw new BizException(ErrorCode.ACL_FORBIDDEN, '无权访问该文档', 403);
+  }
+
+  /** 审核权限：文档所属部门的审核员；sysadmin 兜底（含未挂部门的情况） */
+  private async assertReviewer(user: AuthUser, doc: DocumentEntity) {
+    if (user.role === SystemRole.SYSADMIN) return;
+    if (await this.isDocReviewer(user.userId, doc)) return;
+    throw new BizException(ErrorCode.ACL_FORBIDDEN, '您不是该文档所属部门的审核员', 403);
+  }
+
+  private async isDocReviewer(userId: string, doc: DocumentEntity) {
+    const ws = await this.workspaces.findOne({ where: { id: doc.workspaceId } });
+    if (!ws?.departmentId) return false;
+    return this.acl.isDepartmentAdmin(userId, ws.departmentId);
   }
 }

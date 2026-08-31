@@ -26,3 +26,10 @@
 - **根因**：实体未被任何 `TypeOrmModule.forFeature` 引用时不会注册
 - **修复**：在 `TypeOrmModule.forRoot` 的 `entities` 数组中显式补齐
 - **相关**：`apps/api/src/app.module.ts`
+
+## TypeORM 实体字段写 `string | null` 联合类型报 DataTypeNotSupportedError
+
+- **现象**：`DataTypeNotSupportedError: Data type "Object" in "DepartmentReviewerEntity.grantedBy" is not supported by "postgres"`，TypeORM 连接一直重试，新表全部建不出来
+- **根因**：`@Column({ nullable: true })` 配 `string | null` 时 TS 反射元数据是 `Object`，TypeORM 无法推断列类型（`design:type` 被联合类型抹掉）
+- **修复**：联合类型字段必须显式写 `type`，如 `@Column({ type: 'uuid', nullable: true })`；本次涉及 granted_by / department_id / reviewed_by 三处
+- **相关**：`apps/api/src/database/entities/department-reviewer.entity.ts`、`workspace.entity.ts`、`document.entity.ts`

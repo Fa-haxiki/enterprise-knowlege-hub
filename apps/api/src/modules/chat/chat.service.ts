@@ -36,6 +36,30 @@ export class ChatService {
     );
   }
 
+  /**
+   * AG-UI 语义：threadId 由客户端生成。会话不存在时以 threadId 作为会话 id 直接创建，
+   * 保证 threadId 与 conversation_id 始终一致，前端无需处理 id 变更。
+   */
+  async getOrCreateByThreadId(userId: string, threadId: string | undefined, workspaceId?: string) {
+    if (threadId) {
+      const conv = await this.conversations.findOne({ where: { id: threadId } });
+      if (conv) {
+        if (conv.userId !== userId) {
+          throw new BizException(ErrorCode.NOT_FOUND, '对话不存在', 404);
+        }
+        return { conv, created: false };
+      }
+      const created = await this.conversations.save(
+        this.conversations.create({ id: threadId, userId, workspaceId: workspaceId ?? null }),
+      );
+      return { conv: created, created: true };
+    }
+    const created = await this.conversations.save(
+      this.conversations.create({ userId, workspaceId: workspaceId ?? null }),
+    );
+    return { conv: created, created: true };
+  }
+
   async saveUserMessage(conversationId: string, content: string) {
     return this.messages.save(
       this.messages.create({ conversationId, role: MessageRole.USER, content }),
@@ -123,18 +147,23 @@ export class ChatService {
       skip: (page - 1) * pageSize,
       take: pageSize,
     });
-    return { total, page, page_size: pageSize, items };
+    return { total, page, page_size: pageSize, has_more: page * pageSize < total, items };
   }
 
   /** 历史消息：assistant 消息关联 qa_records 带出图谱推理链路与复杂度，供前端回放 */
+  /**
+   * 消息分页：page=1 返回最新一页（倒序取页后反转为时间正序），
+   * page 递增返回更早的消息，前端滚动到顶部时向前翻页。
+   */
   async listMessages(userId: string, conversationId: string, page = 1, pageSize = 50) {
     await this.assertOwner(userId, conversationId);
     const [items, total] = await this.messages.findAndCount({
       where: { conversationId },
-      order: { createdAt: 'ASC' },
+      order: { createdAt: 'DESC' },
       skip: (page - 1) * pageSize,
       take: pageSize,
     });
+    items.reverse();
 
     const assistantIds = items.filter((m) => m.role === MessageRole.ASSISTANT).map((m) => m.id);
     const records = assistantIds.length
@@ -150,7 +179,7 @@ export class ChatService {
         complexity: record?.complexity ?? null,
       };
     });
-    return { total, page, page_size: pageSize, items: enriched };
+    return { total, page, page_size: pageSize, has_more: page * pageSize < total, items: enriched };
   }
 
   async rename(userId: string, conversationId: string, title: string) {

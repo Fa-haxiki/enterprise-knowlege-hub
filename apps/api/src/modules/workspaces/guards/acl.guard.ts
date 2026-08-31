@@ -5,6 +5,7 @@ import { ErrorCode, SystemRole, WorkspaceRole } from '@ekh/shared';
 import { BizException } from '../../../common/filters/http-exception.filter';
 import type { AuthUser } from '../../../common/decorators/current-user.decorator';
 import { AclService } from '../acl.service';
+import { AclAlertService } from '../../audit/acl-alert.service';
 
 export const REQUIRED_ROLE_KEY = 'requiredWorkspaceRole';
 
@@ -27,6 +28,7 @@ export class AclGuard implements CanActivate {
   constructor(
     private readonly acl: AclService,
     private readonly reflector: Reflector,
+    private readonly alert: AclAlertService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -43,13 +45,27 @@ export class AclGuard implements CanActivate {
     if (!workspaceId) return true; // 非空间资源接口由业务层自行校验
 
     const role = await this.acl.getRole(user.userId, workspaceId);
-    if (!role) throw new BizException(ErrorCode.ACL_FORBIDDEN, '无该知识空间访问权限', 403);
+    if (!role) {
+      await this.alert.trackDenied({
+        userId: user.userId,
+        ip: req.ip,
+        resource: 'workspace',
+        detail: { workspace_id: workspaceId, path: req.path, reason: 'not_member' },
+      });
+      throw new BizException(ErrorCode.ACL_FORBIDDEN, '无该知识空间访问权限', 403);
+    }
 
     const required = this.reflector.getAllAndOverride<WorkspaceRole>(REQUIRED_ROLE_KEY, [
       context.getHandler(),
       context.getClass(),
     ]);
     if (required && ROLE_RANK[role] < ROLE_RANK[required]) {
+      await this.alert.trackDenied({
+        userId: user.userId,
+        ip: req.ip,
+        resource: 'workspace',
+        detail: { workspace_id: workspaceId, path: req.path, role, required },
+      });
       throw new BizException(ErrorCode.ACL_FORBIDDEN, '当前角色无权执行此操作', 403);
     }
 

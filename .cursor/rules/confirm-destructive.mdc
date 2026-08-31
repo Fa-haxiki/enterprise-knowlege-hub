@@ -1,0 +1,38 @@
+---
+description: 所有删除/移除/禁用等破坏性操作必须二次确认，统一使用 useConfirm 组件
+alwaysApply: true
+---
+
+# 破坏性操作二次确认规则
+
+前端所有**删除、移除、清理、禁用/启用类**操作（DELETE 请求、移出成员、删除对话/文档/部门、禁用或启用账号等），**必须**先弹出二次确认框，禁止直接执行。
+
+## 实现方式
+
+统一使用 `apps/web/src/components/ConfirmDialog.tsx` 提供的 `useConfirm` hook，禁止使用浏览器原生 `confirm()` / `window.confirm()`：
+
+```tsx
+import { useConfirm } from '@/components/ConfirmDialog';
+
+const { confirm, confirmDialog } = useConfirm();
+
+const remove = async (id: string) => {
+  const ok = await confirm({
+    title: '删除文档',
+    description: '文档的分片、索引与图谱数据将被一并清理，此操作不可恢复。',
+    confirmText: '确认删除', // 可选，默认"确认删除"；移除类用"确认移出"等
+  });
+  if (!ok) return;
+  await api.delete(`/documents/${id}`);
+};
+
+// 组件 JSX 末尾挂载 {confirmDialog}
+```
+
+## 要求
+
+- `description` 必须说明操作后果（数据是否保留、权限是否失效、是否可恢复）
+- 确认按钮为红色危险样式（组件内置），文案与动作匹配（删除/移出/禁用/启用）
+- 禁用/启用账号也需确认，文案说明"将无法登录系统"/"可正常登录系统"
+- 新增任何 DELETE 调用或破坏性操作时，先检查是否已接确认；code review 时原生 `confirm()` 出现即打回
+- 纯查询、表单编辑、普通状态切换（如审核通过）不需要确认

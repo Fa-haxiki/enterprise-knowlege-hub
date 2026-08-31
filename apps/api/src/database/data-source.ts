@@ -3,7 +3,8 @@ import { DataSource } from 'typeorm';
 import * as path from 'path';
 import * as dotenv from 'dotenv';
 
-dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
+// src/database 与 dist/database 到项目根均为四级，.env 在仓库根
+dotenv.config({ path: path.resolve(__dirname, '../../../../.env') });
 
 export const AppDataSource = new DataSource({
   type: 'postgres',

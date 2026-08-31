@@ -1,10 +1,13 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BullModule } from '@nestjs/bullmq';
-import { ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import * as path from 'path';
 import configuration from './config/configuration';
+import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { SecurityModule } from './modules/security/security.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { UsersModule } from './modules/users/users.module';
 import { WorkspacesModule } from './modules/workspaces/workspaces.module';
@@ -17,6 +20,9 @@ import { ChatModule } from './modules/chat/chat.module';
 import { LlmModule } from './modules/llm/llm.module';
 import { ObservabilityModule } from './modules/observability/observability.module';
 import { AuditModule } from './modules/audit/audit.module';
+import { AdminModule } from './modules/admin/admin.module';
+import { DepartmentsModule } from './modules/departments/departments.module';
+import { TtsModule } from './modules/tts/tts.module';
 import { HealthModule } from './modules/health/health.module';
 import { RedisModule } from './redis/redis.module';
 import { DatabaseInitService } from './database/database-init.service';
@@ -54,7 +60,12 @@ import { IngestionJobEntity } from './database/entities/ingestion-job.entity';
         },
       }),
     }),
-    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
+    ThrottlerModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => [
+        { ttl: 60_000, limit: config.get<number>('app.throttleLimit') ?? 120 },
+      ],
+    }),
     RedisModule,
     AuthModule,
     UsersModule,
@@ -68,8 +79,17 @@ import { IngestionJobEntity } from './database/entities/ingestion-job.entity';
     LlmModule,
     ObservabilityModule,
     AuditModule,
+    AdminModule,
+    DepartmentsModule,
+    TtsModule,
     HealthModule,
+    SecurityModule,
   ],
-  providers: [DatabaseInitService],
+  providers: [
+    DatabaseInitService,
+    // 全局限流：默认 120 次/分/IP，登录等敏感接口另有 @Throttle 覆盖
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_INTERCEPTOR, useClass: LoggingInterceptor },
+  ],
 })
 export class AppModule {}

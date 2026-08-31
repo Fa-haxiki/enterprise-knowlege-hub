@@ -4,6 +4,9 @@ import LoginPage from '@/pages/LoginPage';
 import WorkspacesPage from '@/pages/WorkspacesPage';
 import DocumentsPage from '@/pages/DocumentsPage';
 import ChatPage from '@/pages/ChatPage';
+import AdminPage from '@/pages/AdminPage';
+import ReviewPage from '@/pages/ReviewPage';
+import DepartmentPage from '@/pages/DepartmentPage';
 import Layout from '@/components/Layout';
 
 function RequireAuth({ children }: { children: JSX.Element }) {
@@ -29,6 +32,9 @@ export default function App() {
         <Route path="chat/:conversationId" element={<ChatPage />} />
         <Route path="workspaces" element={<WorkspacesPage />} />
         <Route path="workspaces/:workspaceId/documents" element={<DocumentsPage />} />
+        <Route path="review" element={<ReviewPage />} />
+        <Route path="department" element={<DepartmentPage />} />
+        <Route path="admin" element={<AdminPage />} />
         <Route path="*" element={<Navigate to="/chat" replace />} />
       </Route>
     </Routes>
