@@ -6,6 +6,7 @@
   "scripts": {
     "dev:up": "bash scripts/dev-up.sh",
     "dev:down": "bash scripts/dev-down.sh",
+    "data:clear": "bash scripts/clear-knowledge-data.sh",
     "dev:api": "pnpm --filter @ekh/api dev",
     "dev:worker": "pnpm --filter @ekh/worker dev",
     "dev:web": "pnpm --filter @ekh/web dev",

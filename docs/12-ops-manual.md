@@ -14,9 +14,11 @@
 | elasticsearch | 9200（内部） | 关键词检索 | esdata |
 | neo4j | 7687/7474（内部） | 知识图谱 | neo4jdata |
 | minio | 9000（内部） | 文档原件 | miniodata |
-| mineru | 8700（内部） | 文档解析 | data/models |
 | tts | 8750（内部） | 语音合成 | - |
-| ollama | 11434（内部） | embedding/reranker | ollamadata |
+
+> 文档解析已切换为 MinerU 线上 API（mineru.net，vlm 模型），不再部署本地 mineru 服务；在 `.env` 配置 `MINERU_TOKEN` 即可。每日 1000 页高优先级额度。
+
+> embedding/rerank 已切换为阿里云百炼云端模型（qwen3.7-text-embedding / qwen3-rerank），不再依赖本地 Ollama；在 `.env` 配置 `EMBEDDING_API_KEY` / `RERANKER_API_KEY`（DashScope API Key）即可。
 
 ## 2. 生产部署
 
@@ -29,8 +31,6 @@ bash scripts/gen-cert.sh your-domain.com   # 或放置正式证书到 deploy/cer
 docker compose -f docker-compose.prod.yml up -d --build
 
 # 3. 首次初始化
-docker exec ekh-ollama-1 ollama pull bge-m3
-docker exec ekh-ollama-1 ollama pull qllama/bge-reranker-v2-m3
 docker exec ekh-api-1 node dist/main.js &  # API 启动时自动建表（synchronize）
 pnpm seed:admin   # 或在容器内执行等价脚本
 
@@ -64,7 +64,7 @@ bash scripts/healthcheck.sh https://qyapi.weixin.qq.com/...  # 带企业微信 w
 | 现象 | 排查 | 处置 |
 |---|---|---|
 | 问答无响应 | `docker logs ekh-api-1`；查 LLM 网关连通性 | LLM key 失效则更新 .env 并重启 api |
-| 文档一直"解析中" | `docker logs ekh-worker-1`；`curl localhost:8700/health` | MinerU 异常则 `docker compose -f docker-compose.prod.yml restart mineru`；失败文档用 `reindex` 重试 |
+| 文档一直"解析中" | `docker logs ekh-worker-1` | MinerU 线上 API 异常则检查 `MINERU_TOKEN` 与账户额度；失败文档用 `reindex` 重试 |
 | 回答无引用 | ES 索引为空：`curl localhost:9200/kb_chunks/_count` | 按 SOP §4 从 PG 重建索引 |
 | 语音播放无声 | `curl localhost:8750/health`；浏览器控制台 WS 错误 | 重启 tts 容器；确认 nginx `/socket.io` 反代配置 |
 | 磁盘告警 | `docker system df`；`du -sh data/models` | 清理旧备份、docker 悬空镜像 |

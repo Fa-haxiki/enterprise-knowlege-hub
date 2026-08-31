@@ -37,10 +37,10 @@ flowchart TB
 
     subgraph ai [AI 基础设施]
         LLM["LLM 网关<br/>OpenAI 兼容协议"]
-        Embed["Embedding 服务<br/>bge-m3"]
-        Rerank["Reranker 服务<br/>bge-reranker-v2"]
+        Embed["Embedding<br/>百炼 qwen3.7-text-embedding"]
+        Rerank["Reranker<br/>百炼 qwen3-rerank"]
         TTS["TTS 服务<br/>语音合成"]
-        MinerU["MinerU 服务<br/>文档解析"]
+        MinerU["MinerU 线上 API<br/>文档解析"]
     end
 
     subgraph obs [可观测]
@@ -70,10 +70,11 @@ flowchart TB
 | 图数据库 | Neo4j 5（实体多跳推理，Cypher） |
 | 缓存 / 队列 | Redis 7 + BullMQ |
 | 长期记忆 | Mem0（自托管开源版） |
-| 文档解析 | MinerU（独立 Python 服务，HTTP 调用） |
+| 文档解析 | MinerU 线上 API（mineru.net，vlm 模型） |
 | 对象存储 | MinIO（S3 兼容） |
 | 可观测 | LangFuse（自托管） |
-| LLM 接入 | OpenAI 兼容协议（DeepSeek / 通义 / OpenAI / Ollama 可插拔） |
+| LLM 接入 | OpenAI 兼容协议（DeepSeek / 通义 / OpenAI 可插拔） |
+| 向量 / 排序 | 阿里云百炼 qwen3.7-text-embedding（入库走 Batch API）/ qwen3-rerank |
 | 部署 | Docker Compose |
 
 ## 文档导航
@@ -139,8 +140,8 @@ pnpm dev:down
 ```bash
 bash scripts/gen-cert.sh your-domain.com         # 生成 TLS 证书（或放置正式证书到 deploy/certs/）
 docker compose -f docker-compose.prod.yml up -d --build
-docker exec ekh-ollama-1 ollama pull bge-m3      # 首次：拉取 embedding 模型
-docker exec ekh-ollama-1 ollama pull qllama/bge-reranker-v2-m3
+# embedding/rerank 使用阿里云百炼（qwen3.7-text-embedding / qwen3-rerank），
+# 在 .env 配置 EMBEDDING_API_KEY / RERANKER_API_KEY 即可，无需本地模型
 ```
 
 日常巡检：`bash scripts/healthcheck.sh [告警webhook]`；备份：`bash scripts/backup.sh`。详见 [运维手册](docs/12-ops-manual.md)。

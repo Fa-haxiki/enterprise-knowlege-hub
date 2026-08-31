@@ -45,17 +45,20 @@ export default () => ({
     routerModel: process.env.LLM_ROUTER_MODEL ?? process.env.LLM_MODEL ?? 'deepseek-chat',
   },
   embedding: {
-    baseURL: process.env.EMBEDDING_BASE_URL ?? 'http://localhost:8001/v1',
-    apiKey: process.env.EMBEDDING_API_KEY ?? 'none',
-    model: process.env.EMBEDDING_MODEL ?? 'bge-m3',
+    baseURL: process.env.EMBEDDING_BASE_URL ?? 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    apiKey: process.env.EMBEDDING_API_KEY ?? '',
+    model: process.env.EMBEDDING_MODEL ?? 'qwen3.7-text-embedding',
     dim: parseInt(process.env.EMBEDDING_DIM ?? '1024', 10),
   },
   reranker: {
-    url: process.env.RERANKER_URL ?? 'http://localhost:8002/rerank',
-    model: process.env.RERANKER_MODEL ?? 'bge-reranker-v2-m3',
+    url: process.env.RERANKER_URL ?? 'https://dashscope.aliyuncs.com/compatible-api/v1/reranks',
+    apiKey: process.env.RERANKER_API_KEY ?? process.env.EMBEDDING_API_KEY ?? '',
+    model: process.env.RERANKER_MODEL ?? 'qwen3-rerank',
   },
   mineru: {
-    url: process.env.MINERU_URL ?? 'http://localhost:8700',
+    url: process.env.MINERU_URL ?? 'https://mineru.net',
+    token: process.env.MINERU_TOKEN ?? '',
+    model: process.env.MINERU_MODEL ?? 'vlm',
   },
   mem0: {
     url: process.env.MEM0_URL ?? 'http://localhost:8888',

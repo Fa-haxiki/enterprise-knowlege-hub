@@ -94,6 +94,10 @@ export class WorkspacesService {
     patch: { name?: string; description?: string; department_id?: string | null },
   ) {
     const { department_id, ...rest } = patch;
+    // 空间必须挂靠部门：不允许置空
+    if (department_id === null) {
+      throw new BizException(ErrorCode.PARAM_INVALID, '空间必须挂靠部门，不允许取消挂靠', 400);
+    }
     // 改挂靠部门同样限制在自己所属的部门内
     if (department_id && user.role !== SystemRole.SYSADMIN) {
       const myDeps = await this.acl.memberDepartmentIds(user.userId);

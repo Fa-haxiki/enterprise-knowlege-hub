@@ -252,6 +252,9 @@ importers:
       bullmq:
         specifier: ^5.34.0
         version: 5.81.4
+      fflate:
+        specifier: ^0.8.3
+        version: 0.8.3
       ioredis:
         specifier: ^5.4.2
         version: 5.11.1

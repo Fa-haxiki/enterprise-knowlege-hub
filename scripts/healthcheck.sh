@@ -26,9 +26,7 @@ check "Redis"      docker exec ekh-redis-1 redis-cli -a "$(grep ^REDIS_PASSWORD 
 check "ES"         curl -sf --max-time 5 http://localhost:9200/_cluster/health
 check "Neo4j"      curl -sf --max-time 5 http://localhost:7474
 check "MinIO"      curl -sf --max-time 5 http://localhost:9000/minio/health/live
-check "MinerU"     curl -sf --max-time 5 http://localhost:8700/health
 check "TTS"        curl -sf --max-time 5 http://localhost:8750/health
-check "Ollama"     curl -sf --max-time 5 http://localhost:11434/api/tags
 
 if [ ${#FAILURES[@]} -eq 0 ]; then
   echo "==> 全部正常"

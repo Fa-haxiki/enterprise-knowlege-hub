@@ -78,26 +78,6 @@ services:
       retries: 5
     restart: unless-stopped
 
-  mineru:
-    image: ${MINERU_IMAGE:-mineru-api:latest}
-    build:
-      context: ./services/mineru
-    environment:
-      HF_ENDPOINT: https://hf-mirror.com
-    volumes:
-      - ./data/models:/root/models
-      - ./data/hf-cache:/root/.cache/huggingface
-    restart: unless-stopped
-
-  ollama:
-    image: ollama/ollama:latest
-    volumes:
-      - ollamadata:/root/.ollama
-    # 首次启动后需拉取模型：
-    #   docker exec ekh-ollama-1 ollama pull bge-m3
-    #   docker exec ekh-ollama-1 ollama pull qllama/bge-reranker-v2-m3
-    restart: unless-stopped
-
   tts:
     image: ${TTS_IMAGE:-ekh-tts:latest}
     build:
@@ -119,10 +99,7 @@ services:
       ES_NODE: http://elasticsearch:9200
       NEO4J_URI: bolt://neo4j:7687
       MINIO_ENDPOINT: minio
-      MINERU_URL: http://mineru:8700
       TTS_SERVICE_URL: http://tts:8750
-      EMBEDDING_BASE_URL: http://ollama:11434/v1
-      RERANKER_URL: http://ollama:11434/v1/rerank
     depends_on:
       postgres:
         condition: service_healthy
@@ -146,16 +123,11 @@ services:
       ES_NODE: http://elasticsearch:9200
       NEO4J_URI: bolt://neo4j:7687
       MINIO_ENDPOINT: minio
-      MINERU_URL: http://mineru:8700
-      EMBEDDING_BASE_URL: http://ollama:11434/v1
-      RERANKER_URL: http://ollama:11434/v1/rerank
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      mineru:
-        condition: service_started
     restart: unless-stopped
 
   web:
@@ -179,4 +151,3 @@ volumes:
   esdata:
   neo4jdata:
   miniodata:
-  ollamadata:

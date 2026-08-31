@@ -48,7 +48,7 @@ export class IngestionProcessor extends WorkerHost {
     super();
   }
 
-  async process(job: Job<IngestionJobData>): Promise<void> {
+  async process(job: Job<IngestionJobData>, token?: string): Promise<void> {
     const { documentId, fromStage } = job.data;
     const doc = await this.documents.findOne({ where: { id: documentId } });
     if (!doc) {
@@ -69,10 +69,12 @@ export class IngestionProcessor extends WorkerHost {
     }
 
     try {
-      // 1. MinerU 解析
+      // 1. MinerU 线上解析（异步轮询，期间续 BullMQ 锁）
       await this.transition(doc, DocumentStatus.PARSING, 5);
       const file = await this.storage.getObjectBuffer(doc.fileKey);
-      const parsed = await this.mineru.parse(file, doc.title);
+      const parsed = await this.mineru.parse(file, doc.title, () => {
+        if (token) void job.extendLock(token, 60_000).catch(() => undefined);
+      });
       await this.trackJob(documentId, IngestionStage.PARSE, JobStatus.DONE);
 
       // 2. 语义分块
@@ -81,9 +83,9 @@ export class IngestionProcessor extends WorkerHost {
       await this.trackJob(documentId, IngestionStage.CHUNK, JobStatus.DONE);
       this.logger.log(`document ${documentId}: ${drafts.length} chunks`);
 
-      // 3. Embedding + PGVector/ES 双写
+      // 3. Embedding（百炼 Batch API，异步轮询）+ PGVector/ES 双写
       await this.transition(doc, DocumentStatus.INDEXING, 50);
-      await this.indexChunks(doc, drafts, parsed);
+      await this.indexChunks(doc, drafts, parsed, job, token);
       await this.trackJob(documentId, IngestionStage.INDEX, JobStatus.DONE);
 
       // 4. 实体抽取 + Neo4j 建图（失败不阻断 READY）
@@ -105,14 +107,20 @@ export class IngestionProcessor extends WorkerHost {
     }
   }
 
-  /** Embedding + 双写：批量向量化，PG 事务写入后逐条写 ES */
-  private async indexChunks(doc: DocumentEntity, drafts: ChunkDraft[], parsed: MineruResult) {
+  /** Embedding + 双写：Batch API 批量向量化，PG 事务写入后逐条写 ES */
+  private async indexChunks(
+    doc: DocumentEntity,
+    drafts: ChunkDraft[],
+    parsed: MineruResult,
+    job: Job<IngestionJobData>,
+    token?: string,
+  ) {
     // 重建场景：先清旧数据
     await this.chunks.delete({ documentId: doc.id });
     await this.es.deleteByDocument(doc.id);
 
     const texts = drafts.map((d) => this.chunker.enrichForEmbedding(doc.title, d));
-    const vectors = await this.embedding.embed(texts);
+    const vectors = texts.length > 0 ? await this.embedViaBatch(texts, job, token) : [];
 
     await this.dataSource.transaction(async (em) => {
       for (let i = 0; i < drafts.length; i++) {
@@ -146,6 +154,30 @@ export class IngestionProcessor extends WorkerHost {
     await this.documents.update(doc.id, {
       meta: { ...doc.meta, pages: parsed.meta.pages, parser: parsed.meta.parser_version },
     });
+  }
+
+  /**
+   * 百炼 Batch API 向量化：提交后每 15s 轮询，期间续 BullMQ 锁防 stalled；
+   * 20 分钟未完成抛错走 BullMQ 重试（重建场景幂等：先清后写）
+   */
+  private async embedViaBatch(texts: string[], job: Job<IngestionJobData>, token?: string): Promise<number[][]> {
+    const batchId = await this.embedding.submitEmbedBatch(texts);
+    this.logger.log(`embedding batch ${batchId} submitted (${texts.length} texts), polling...`);
+    const deadline = Date.now() + 20 * 60_000;
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 15_000));
+      if (token) await job.extendLock(token, 60_000).catch(() => undefined);
+      const info = await this.embedding.getBatch(batchId);
+      if (info.status === 'completed' && info.outputFileId) {
+        return this.embedding.downloadBatchVectors(info.outputFileId, texts.length);
+      }
+      if (info.status === 'failed' || info.status === 'expired' || info.status === 'cancelled') {
+        throw new Error(`embedding batch ${batchId} ${info.status}: ${info.error ?? 'unknown'}`);
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`embedding batch ${batchId} timeout after 20min (status=${info.status})`);
+      }
+    }
   }
 
   /** 实体抽取 + Neo4j 写入（按 chunk 批处理） */

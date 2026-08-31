@@ -7,7 +7,7 @@ LOG_DIR="$ROOT/logs"
 PID_DIR="$ROOT/.pids"
 mkdir -p "$LOG_DIR" "$PID_DIR"
 
-# 1. Docker 中间件（postgres/neo4j/es/redis/minio/ollama/mineru/langfuse）
+# 1. Docker 中间件（postgres/neo4j/es/redis/minio/tts/mem0）
 echo "==> 启动 Docker 服务..."
 docker compose up -d
 
@@ -23,17 +23,6 @@ until curl -sf http://localhost:7474 >/dev/null 2>&1; do sleep 1; done
 if [ ! -f apps/api/dist/main.js ] || [ ! -f apps/worker/dist/main.js ]; then
   echo "==> dist 缺失，执行构建..."
   pnpm -r --filter @ekh/api --filter @ekh/worker build
-fi
-
-# 3.5 Ollama（宿主机本地服务，不在 docker compose 内；embedding/reranker 依赖）
-if curl -sf --max-time 2 http://localhost:11434/api/tags >/dev/null 2>&1; then
-  echo "==> Ollama 已在运行 (:11434)，跳过"
-elif command -v ollama >/dev/null 2>&1; then
-  echo "==> 启动 Ollama..."
-  python3 "$ROOT/scripts/spawn-daemon.py" "$LOG_DIR/ollama.log" "$ROOT" ollama serve > "$PID_DIR/ollama.pid"
-  until curl -sf --max-time 2 http://localhost:11434/api/tags >/dev/null 2>&1; do sleep 1; done
-else
-  echo "==> 警告：未检测到 ollama，embedding/reranker 将不可用"
 fi
 
 port_in_use() { lsof -ti :"$1" >/dev/null 2>&1; }
@@ -73,6 +62,5 @@ echo ""
 echo "全部启动完成："
 echo "  Web:    http://localhost:5173"
 echo "  API:    http://localhost:8080/api/v1/health"
-echo "  MinerU: http://localhost:8700/health"
 echo "  日志:   logs/{api,worker,web}.log"
 echo "  停止:   pnpm dev:down"

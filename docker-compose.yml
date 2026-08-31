@@ -83,30 +83,6 @@ services:
       timeout: 5s
       retries: 5
 
-  mineru:
-    image: ${MINERU_IMAGE:-mineru-api:latest}
-    build:
-      context: ./services/mineru
-    environment:
-      # huggingface.co 国内不可达，layoutreader 等运行时模型走镜像站
-      HF_ENDPOINT: https://hf-mirror.com
-    volumes:
-      # 模型权重持久化到宿主机，避免容器重建后重新下载
-      - ./data/models:/root/models
-      - ./data/hf-cache:/root/.cache/huggingface
-    expose:
-      - "8700"
-    ports:
-      - "127.0.0.1:8700:8700"
-    # GPU 模式取消注释：
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
-    #           capabilities: [gpu]
-
   mem0:
     image: mem0/mem0-api-server:latest
     env_file: .env

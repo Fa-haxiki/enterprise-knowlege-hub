@@ -12,7 +12,11 @@ export interface RerankResult {
   score: number;
 }
 
-/** Reranker 客户端：bge-reranker 兼容 HTTP 接口 */
+/**
+ * Reranker 客户端：阿里云百炼 qwen3-rerank。
+ * 端点为 compatible-api/v1/reranks（与 embedding 的 compatible-mode 路径不同），
+ * 扁平请求体；响应兼容 Cohere 风格 {results:[...]} 与 DashScope 风格 {output:{results:[...]}}。
+ */
 @Injectable()
 export class RerankerService {
   private readonly logger = new Logger(RerankerService.name);
@@ -22,10 +26,14 @@ export class RerankerService {
   async rerank(input: RerankInput): Promise<RerankResult[]> {
     const url = this.config.get<string>('reranker.url');
     const model = this.config.get<string>('reranker.model');
+    const apiKey = this.config.get<string>('reranker.apiKey');
 
     const res = await fetch(url as string, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+      },
       body: JSON.stringify({
         model,
         query: input.query,
@@ -40,8 +48,14 @@ export class RerankerService {
       throw new Error(`reranker service error: ${res.status}`);
     }
     const json = (await res.json()) as {
-      results: { index: number; relevance_score: number }[];
+      results?: { index: number; relevance_score: number }[];
+      output?: { results?: { index: number; relevance_score: number }[] };
     };
-    return json.results.map((r) => ({ index: r.index, score: r.relevance_score }));
+    const results = json.results ?? json.output?.results;
+    if (!results) {
+      this.logger.error(`reranker unexpected response: ${JSON.stringify(json).slice(0, 300)}`);
+      throw new Error('reranker response malformed');
+    }
+    return results.map((r) => ({ index: r.index, score: r.relevance_score }));
   }
 }

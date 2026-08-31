@@ -1,5 +1,53 @@
 # NestJS 后端坑点
 
+## PATCH 接口的可空字段校验绕过：`if (value)` 挡不住显式传 null
+
+- **现象**：空间 update 接口传 `{"department_id": null}` 可绕过「必须挂部门」校验，把空间改成无部门，导致部门管理员看不到该空间的待审文档
+- **根因**：校验写成 `if (department_id && ...)`，显式传 `null` 时跳过校验；而落库判断是 `!== undefined`，null 被写入
+- **修复**：对「必填但可 PATCH 的字段」显式拒绝 null：`if (department_id === null) throw ...`；历史脏数据用 SQL 补挂部门
+- **教训**：可空字段的 PATCH 校验要用 `=== null` / `!== undefined` 区分「未传」与「显式置空」，不能依赖真值判断
+- **相关**：`apps/api/src/modules/workspaces/workspaces.service.ts` update
+
+## MinerU 线上 API：单文件解析接口不支持直接上传文件
+
+- **现象**：`POST /api/v4/extract/task` 只接受 `url` 参数，multipart 上传无效；本地 MinIO 的 localhost 地址云端又不可达
+- **根因**：线上 API 设计为「URL 拉取」或「签名上传」两种模式，无 multipart 直传
+- **修复**：本地文件走 `POST /api/v4/file-urls/batch` 申请 OSS 签名链接（单文件也可，files 数组传 1 个）→ PUT 上传（不要设 Content-Type）→ 自动提交解析 → 轮询 `GET /api/v4/extract-results/batch/{batch_id}` → 下载 `full_zip_url`
+- **相关**：`apps/worker/src/pipelines/mineru.client.ts`
+
+## MinerU 线上结果是 zip 包，需映射 content_list.json 而非结构化 blocks
+
+- **现象**：线上 API 不返回结构化 JSON，只有 zip（full.md + `*_content_list.json` + layout.json + 图片）
+- **修复**：用 `fflate` 解压，取 `*_content_list.json`（注意排除 `_content_list_v2.json`）；类型映射：`text`+`text_level`→heading、`text`→paragraph、`table`→table（`table_body` 是 HTML）、`equation`→formula、`image/chart`→figure；`header/footer/page_number/page_footnote/ref_text` 是页眉页脚噪声直接丢弃（比本地服务更干净）；`page_idx` 是 0 起始需 +1
+- **相关**：`apps/worker/src/pipelines/mineru.client.ts` fetchAndMap
+
+## 百炼 compatible-api 与 compatible-mode 是两套不同路径
+
+- **现象**：rerank 请求打到 `compatible-mode/v1/reranks` 会 404；embedding 打到 `compatible-api` 同理
+- **根因**：DashScope 的 OpenAI 兼容入口分两个：embedding/batch/chat 走 `https://dashscope.aliyuncs.com/compatible-mode/v1`，rerank 走 `https://dashscope.aliyuncs.com/compatible-api/v1/reranks`，路径不通用
+- **修复**：`.env` 中 `EMBEDDING_BASE_URL` 与 `RERANKER_URL` 分别配置，reranker 配置完整 URL（非 baseURL 拼接）
+- **相关**：`apps/api/src/modules/llm/reranker.service.ts`、`apps/api/src/config/configuration.ts`
+
+## 百炼 Embedding Batch API 是异步任务，需轮询且防 BullMQ stalled
+
+- **现象**：入库 embedding 改 Batch API 后，job 处理时间从秒级变分钟级，BullMQ 报 stalled 并重复执行 job（重复提交 batch）
+- **根因**：Batch 流程为 上传 jsonl（POST /files, purpose=batch）→ 创建任务（POST /batches, endpoint=/v1/embeddings）→ 轮询 GET /batches/{id} → 下载 GET /files/{output_file_id}/content；轮询期间超过 BullMQ 默认 lockDuration(30s) 锁过期
+- **修复**：轮询循环内每 15s `job.extendLock(token, 60_000)` 续锁（process 需声明第二个参数接收 token）；20 分钟超时抛错走重试（重建场景幂等：先清后写）
+- **相关**：`apps/worker/src/processors/ingestion.processor.ts` embedViaBatch、`apps/api/src/modules/llm/embedding.service.ts`
+
+## 百炼同步 embeddings 单批上限 20 条
+
+- **现象**：qwen3.7-text-embedding 同步接口 input 数组超过 20 条直接报错
+- **修复**：`EmbeddingService.embed` 按 20 条分批串行合并；响应按 `data[].index` 归位（不保证顺序），并校验返回维度与 `EMBEDDING_DIM` 一致
+- **相关**：`apps/api/src/modules/llm/embedding.service.ts` SYNC_BATCH_LIMIT
+
+## 百炼 403 AllocationQuota.FreeTierOnly 是额度问题非协议错误
+
+- **现象**：rerank/embedding 返回 403 `{"code":"AllocationQuota.FreeTierOnly","message":"Free quota exhausted..."}`
+- **根因**：账号开了「仅使用免费额度」模式且该模型 100 万 token 免费额度已用完；请求本身（鉴权/模型名/body）已被正常受理
+- **修复**：百炼控制台关闭「仅免费额度」模式或充值；检索链路对 rerank 失败有降级（按 RRF 取 Top-N），不阻断问答
+- **相关**：`apps/api/src/modules/retrieval/retrieval.service.ts`（reranker degraded 日志）
+
 ## @nestjs/websockets 必须与大版本对齐
 
 - **现象**：API 启动崩溃 `ERR_MODULE_NOT_FOUND: @nestjs/common/internal`
