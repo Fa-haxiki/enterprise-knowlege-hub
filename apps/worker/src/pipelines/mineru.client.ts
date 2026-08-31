@@ -63,7 +63,7 @@ export class MineruClient {
   /** onPoll：轮询回调（worker 用于续 BullMQ 锁） */
   async parse(file: Buffer, filename: string, onPoll?: () => void): Promise<MineruResult> {
     // 1. 申请签名上传链接（单文件也走 batch 接口，上传后自动提交解析）
-    const applyRes = await fetch(`${this.base}/api/v4/file-urls/batch`, {
+    const applyRes = await this.fetchWithCause(`${this.base}/api/v4/file-urls/batch`, {
       method: 'POST',
       headers: this.headers,
       body: JSON.stringify({
@@ -92,7 +92,7 @@ export class MineruClient {
     const { batch_id: batchId, file_urls: fileUrls } = applyJson.data;
 
     // 2. PUT 上传文件（无须 Content-Type）
-    const uploadRes = await fetch(fileUrls[0], {
+    const uploadRes = await this.fetchWithCause(fileUrls[0], {
       method: 'PUT',
       body: new Uint8Array(file),
       signal: AbortSignal.timeout(5 * 60_000),
@@ -110,15 +110,38 @@ export class MineruClient {
     return this.fetchAndMap(zipUrl);
   }
 
+  /** fetch 包装：失败时打出 undici cause 便于定位网络层根因 */
+  private async fetchWithCause(url: string, init: Parameters<typeof fetch>[1]): Promise<Response> {
+    try {
+      return await fetch(url, init);
+    } catch (e) {
+      const cause = (e as { cause?: { code?: string; message?: string } }).cause;
+      this.logger.error(
+        `mineru fetch error url=${url.slice(0, 80)}: ${(e as Error).message} cause=${cause?.code ?? ''} ${cause?.message ?? ''}`,
+      );
+      throw e;
+    }
+  }
+
   private async pollResult(batchId: string, onPoll?: () => void): Promise<string> {
     const deadline = Date.now() + POLL_TIMEOUT_MS;
     for (;;) {
       await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
       onPoll?.();
-      const res = await fetch(`${this.base}/api/v4/extract-results/batch/${batchId}`, {
-        headers: this.headers,
-        signal: AbortSignal.timeout(15_000),
-      });
+      let res: Response;
+      try {
+        res = await this.fetchWithCause(`${this.base}/api/v4/extract-results/batch/${batchId}`, {
+          headers: this.headers,
+          signal: AbortSignal.timeout(15_000),
+        });
+      } catch (e) {
+        const cause = (e as { cause?: { code?: string; message?: string } }).cause;
+        this.logger.warn(
+          `mineru poll fetch error: ${(e as Error).message} cause=${cause?.code ?? ''} ${cause?.message ?? ''}, retrying`,
+        );
+        if (Date.now() > deadline) throw e;
+        continue;
+      }
       if (!res.ok) {
         this.logger.warn(`mineru poll failed: ${res.status}, retrying`);
         continue;
@@ -136,7 +159,7 @@ export class MineruClient {
   }
 
   private async fetchAndMap(zipUrl: string): Promise<MineruResult> {
-    const res = await fetch(zipUrl, { signal: AbortSignal.timeout(2 * 60_000) });
+    const res = await this.fetchWithCause(zipUrl, { signal: AbortSignal.timeout(2 * 60_000) });
     if (!res.ok) throw new Error(`mineru result download error: ${res.status}`);
     const entries = unzipSync(new Uint8Array(await res.arrayBuffer()));
 

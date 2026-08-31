@@ -242,6 +242,14 @@ export default function ChatPage() {
           },
           onCitation: (c) => update((m) => ({ ...m, citations: [...(m.citations ?? []), c] })),
           onGraphPath: (triples) => update((m) => ({ ...m, triples })),
+          onUsage: (u) =>
+            update((m) => ({
+              ...m,
+              usage: { prompt_tokens: u.prompt_tokens, completion_tokens: u.completion_tokens },
+              latencyMs: u.latency_ms ?? null,
+              nodeLatencies: u.node_latencies ?? null,
+              degradedNodes: u.degraded ?? [],
+            })),
           onFinished: (result) => {
             update((m) => ({
               ...m,

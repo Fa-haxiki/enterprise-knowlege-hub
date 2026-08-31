@@ -33,7 +33,7 @@ export class LlmService {
     });
   }
 
-  createChatModel(options?: { model?: string; temperature?: number; streaming?: boolean }) {
+  createChatModel(options?: { model?: string; temperature?: number; streaming?: boolean; timeout?: number }) {
     return new ChatOpenAI({
       model: options?.model ?? this.config.get<string>('llm.model') ?? 'deepseek-chat',
       temperature: options?.temperature ?? 0.1,
@@ -41,15 +41,32 @@ export class LlmService {
       apiKey: this.config.get<string>('llm.apiKey'),
       configuration: { baseURL: this.config.get<string>('llm.baseURL') },
       maxRetries: 2,
-      timeout: 60_000,
+      timeout: options?.timeout ?? 60_000,
     });
   }
 
   /** 非流式调用：用于路由分类、实体抽取、查询改写等内部环节 */
-  async invoke(messages: BaseMessage[], options?: { model?: string; temperature?: number }): Promise<string> {
+  async invoke(
+    messages: BaseMessage[],
+    options?: { model?: string; temperature?: number; timeout?: number },
+  ): Promise<string> {
+    const { text } = await this.invokeWithUsage(messages, options);
+    return text;
+  }
+
+  /** 非流式调用（含 token 用量）：供 LangFuse generation 埋点使用 */
+  async invokeWithUsage(
+    messages: BaseMessage[],
+    options?: { model?: string; temperature?: number; timeout?: number },
+  ): Promise<{ text: string; usage: ChatUsage }> {
     const model = this.createChatModel(options);
     const res = await model.invoke(this.maskMessages(messages));
-    return typeof res.content === 'string' ? res.content : JSON.stringify(res.content);
+    const text = typeof res.content === 'string' ? res.content : JSON.stringify(res.content);
+    const u = res.usage_metadata;
+    return {
+      text,
+      usage: { prompt_tokens: u?.input_tokens ?? 0, completion_tokens: u?.output_tokens ?? 0 },
+    };
   }
 
   /**

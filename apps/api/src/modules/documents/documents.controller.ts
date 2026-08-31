@@ -10,7 +10,17 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { IsBoolean, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  ArrayMaxSize,
+  ArrayMinSize,
+  IsArray,
+  IsBoolean,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+} from 'class-validator';
 import { WorkspaceRole } from '@ekh/shared';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser, type AuthUser } from '../../common/decorators/current-user.decorator';
@@ -28,6 +38,29 @@ class ReviewDocumentDto {
   @IsNotEmpty()
   @MaxLength(500)
   reason?: string;
+}
+
+class ReviewBatchDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(100)
+  @IsUUID('4', { each: true })
+  ids: string[];
+
+  @IsBoolean()
+  approve: boolean;
+
+  @IsOptional()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(500)
+  reason?: string;
+}
+
+class CheckDuplicateDto {
+  @IsString()
+  @IsNotEmpty()
+  content_hash: string;
 }
 
 @ApiTags('documents')
@@ -61,6 +94,31 @@ export class DocumentsController {
       detail: { approve: dto.approve, reason: dto.reason ?? null },
     });
     return result;
+  }
+
+  /** 批量审核：逐条处理，单条失败不影响其他；返回每条结果 */
+  @Post('documents/review-batch')
+  async reviewBatch(@CurrentUser() user: AuthUser, @Body() dto: ReviewBatchDto) {
+    const result = await this.documents.reviewBatch(user, dto.ids, dto.approve, dto.reason);
+    this.audit.record({
+      userId: user.userId,
+      action: 'document_review_batch',
+      resourceType: 'document',
+      resourceId: dto.ids.join(','),
+      detail: { approve: dto.approve, count: dto.ids.length, succeeded: result.succeeded },
+    });
+    return result;
+  }
+
+  /** 上传前内容查重预检：前端算 sha256 后调用，命中重复则无需上传 */
+  @Post('workspaces/:workspaceId/documents/check-duplicate')
+  @UseGuards(AclGuard)
+  @RequireWorkspaceRole(WorkspaceRole.EDITOR)
+  checkDuplicate(
+    @Param('workspaceId', ParseUUIDPipe) workspaceId: string,
+    @Body() dto: CheckDuplicateDto,
+  ) {
+    return this.documents.checkDuplicate(workspaceId, dto.content_hash);
   }
 
   @Post('workspaces/:workspaceId/documents/upload-init')

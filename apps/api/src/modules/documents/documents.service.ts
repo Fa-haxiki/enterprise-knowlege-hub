@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, IsNull, Not, Repository } from 'typeorm';
 import { DocumentStatus, ErrorCode, SystemRole, WorkspaceRole } from '@ekh/shared';
 import { DocumentEntity } from '../../database/entities/document.entity';
 import { WorkspaceEntity } from '../../database/entities/workspace.entity';
@@ -67,10 +67,47 @@ export class DocumentsService {
       throw new BizException(ErrorCode.DOC_STATUS_INVALID, `当前状态 ${doc.status} 不可重复提交`, 400);
     }
 
-    await this.storage.completeMultipartUpload(doc.fileKey, partCount);
+    const { contentHash } = await this.storage.completeMultipartUpload(doc.fileKey, partCount);
+
+    // 内容防重：同空间已有相同 sha256 的文档时拒绝（REJECTED/已删除允许重传）
+    const dup = await this.findDuplicate(doc.workspaceId, contentHash, doc.id);
+    if (dup) {
+      await this.storage.remove(doc.fileKey);
+      await this.documents.delete(doc.id);
+      throw new BizException(
+        ErrorCode.PARAM_INVALID,
+        `内容与已有文档《${dup.title}》重复，无需重复上传`,
+        409,
+      );
+    }
+
+    doc.contentHash = contentHash;
     // 审核制：上传完成后进入待审核，由部门审核员通过后才入队解析
     await this.transition(doc, DocumentStatus.PENDING_REVIEW);
     return { document_id: doc.id, status: DocumentStatus.PENDING_REVIEW };
+  }
+
+  /** 同空间内容查重：返回首个相同 hash 的有效文档（排除 REJECTED/已删除/自身） */
+  private async findDuplicate(workspaceId: string, contentHash: string, excludeId?: string) {
+    return this.documents.findOne({
+      where: {
+        workspaceId,
+        contentHash,
+        deletedAt: IsNull(),
+        status: Not(DocumentStatus.REJECTED),
+        ...(excludeId ? { id: Not(excludeId) } : {}),
+      },
+      order: { createdAt: 'ASC' },
+    });
+  }
+
+  /** 上传前预检：前端算好 sha256 先查重，命中则不必上传 */
+  async checkDuplicate(workspaceId: string, contentHash: string) {
+    if (!/^[0-9a-f]{64}$/.test(contentHash)) {
+      throw new BizException(ErrorCode.PARAM_INVALID, 'content_hash 格式不正确', 400);
+    }
+    const dup = await this.findDuplicate(workspaceId, contentHash);
+    return { duplicate: !!dup, title: dup?.title ?? null };
   }
 
   /**
@@ -97,6 +134,21 @@ export class DocumentsService {
     return { document_id: doc.id, status: doc.status };
   }
 
+  /** 批量审核：逐条复用单条逻辑（权限/状态校验），单条失败不阻断其他 */
+  async reviewBatch(user: AuthUser, ids: string[], approve: boolean, reason?: string) {
+    const results: { document_id: string; ok: boolean; message?: string }[] = [];
+    for (const id of ids) {
+      try {
+        await this.review(user, id, approve, reason);
+        results.push({ document_id: id, ok: true });
+      } catch (e) {
+        results.push({ document_id: id, ok: false, message: (e as Error).message });
+      }
+    }
+    const succeeded = results.filter((r) => r.ok).length;
+    return { results, succeeded, failed: results.length - succeeded };
+  }
+
   /** 待审核列表：我作为审核员的部门下的待审核文档；sysadmin 另含未挂部门的 */
   async pendingReviewList(user: AuthUser) {
     const departmentIds = await this.acl.adminDepartmentIds(user.userId);
@@ -111,7 +163,7 @@ export class DocumentsService {
       .map((w) => w.id);
     if (inScope.length === 0) return { items: [] };
     const items = await this.documents.find({
-      where: { workspaceId: In(inScope), status: DocumentStatus.PENDING_REVIEW, deletedAt: undefined },
+      where: { workspaceId: In(inScope), status: DocumentStatus.PENDING_REVIEW, deletedAt: IsNull() },
       relations: { uploader: true, workspace: true },
       order: { createdAt: 'ASC' },
     });
@@ -131,7 +183,7 @@ export class DocumentsService {
 
   async list(workspaceId: string, page = 1, pageSize = 20) {
     const [items, total] = await this.documents.findAndCount({
-      where: { workspaceId, deletedAt: undefined },
+      where: { workspaceId, deletedAt: IsNull() },
       order: { createdAt: 'DESC' },
       skip: (page - 1) * pageSize,
       take: pageSize,

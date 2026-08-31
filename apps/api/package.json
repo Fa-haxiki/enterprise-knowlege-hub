@@ -10,7 +10,8 @@
     "test": "jest",
     "migration:run": "typeorm-ts-node-commonjs -d src/database/data-source.ts migration:run",
     "migration:generate": "typeorm-ts-node-commonjs -d src/database/data-source.ts migration:generate",
-    "seed:admin": "ts-node src/database/seed-admin.ts"
+    "seed:admin": "ts-node src/database/seed-admin.ts",
+    "backfill:hash": "ts-node src/database/backfill-content-hash.ts"
   },
   "dependencies": {
     "@ekh/shared": "workspace:*",

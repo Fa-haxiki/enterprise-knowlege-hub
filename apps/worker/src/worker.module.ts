@@ -9,6 +9,7 @@ import { LlmModule } from '@ekh/api/modules/llm/llm.module';
 import { SecurityModule } from '@ekh/api/modules/security/security.module';
 import { RetrievalModule } from '@ekh/api/modules/retrieval/retrieval.module';
 import { GraphModule } from '@ekh/api/modules/graph/graph.module';
+import { ObservabilityModule } from '@ekh/api/modules/observability/observability.module';
 import { StorageService } from '@ekh/api/modules/documents/storage.service';
 import { DocumentEntity } from '@ekh/api/database/entities/document.entity';
 import { DocumentChunkEntity } from '@ekh/api/database/entities/document-chunk.entity';
@@ -56,6 +57,7 @@ import { EntityExtractor } from './pipelines/entity-extractor';
     SecurityModule,
     RetrievalModule,
     GraphModule,
+    ObservabilityModule,
   ],
   providers: [IngestionProcessor, MineruClient, Chunker, EntityExtractor, StorageService],
 })

@@ -69,3 +69,10 @@
 - **根因**：分片上传时对象 Content-Type 落为 `binary/octet-stream`，浏览器对未知类型无视 inline 一律下载
 - **修复**：respHeaders 同时覆盖 `response-content-type` 为文档真实 MIME（如 `application/pdf`）
 - **相关**：`apps/api/src/modules/documents/storage.service.ts` presignDownload
+
+## macOS 系统代理（Clash）下 Node fetch 直连被重置 / 走代理复用死连接挂起
+
+- **现象**：worker 调 MinerU 线上 API，apply/PUT 成功但 10s 后第一次轮询必现 `fetch failed cause=ECONNRESET`（TLS 握手被重置）；改用 `NODE_USE_ENV_PROXY=1` 走代理后，又出现请求挂起（LLM 调用 60s 超时）
+- **根因**：①系统代理启用时 mineru.net 直连被中间设备干扰（curl 读系统代理所以正常，Node fetch 默认直连）；②走代理后 undici keep-alive 复用的空闲隧道连接已被代理回收，复用即 ECONNRESET 或静默挂起
+- **修复**：最终方案是关掉系统代理走纯直连（用户网络环境 mineru.net/阿里云直连可达）；若必须走代理，需 `NODE_USE_ENV_PROXY=1` + 禁 keep-alive 的 dispatcher（`new Agent({keepAliveTimeout:1})`，且 undici 包版本须与 Node 内置 fetch 协议匹配，Node 24 用 undici@7，@8 会报 `UND_ERR_INVALID_ARG invalid onRequestStart`）
+- **相关**：`apps/worker/src/pipelines/mineru.client.ts` fetchWithCause（保留 cause 日志便于定位）

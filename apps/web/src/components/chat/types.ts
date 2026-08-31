@@ -1,6 +1,6 @@
-import type { AgentStep, Citation, Triple } from '@/lib/agui';
+import type { AgentStep, Citation, Triple, UsageInfo } from '@/lib/agui';
 
-export type { AgentStep, Citation, Triple };
+export type { AgentStep, Citation, Triple, UsageInfo };
 
 export interface Message {
   id: string;
@@ -12,6 +12,11 @@ export interface Message {
   steps?: AgentStep[];
   triples?: Triple[];
   complexity?: 'simple' | 'complex' | null;
+  /** 完成后由 usage 事件 / 历史接口带出：各节点耗时与降级节点（与消息实体一致的 camelCase） */
+  nodeLatencies?: Record<string, number> | null;
+  degradedNodes?: string[];
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  latencyMs?: number | null;
 }
 
 export interface Conversation {
@@ -32,6 +37,19 @@ export const STEP_LABELS: Record<string, string> = {
   prompt_build: '构建提示词',
   llm_generate: '生成回答',
 };
+
+/** 节点实际执行顺序：node_latencies 由 state 合并而来 key 顺序不可靠，历史回放按此排序 */
+export const STEP_ORDER = [
+  'acl_guard',
+  'load_window',
+  'query_rewrite',
+  'complexity_router',
+  'hybrid_retrieve',
+  'graph_reason',
+  'memory_load',
+  'prompt_build',
+  'llm_generate',
+];
 
 /** 与后端 splitSentences 保持一致的切分（保留供后续按句高亮等场景复用） */
 export function splitSentences(text: string): string[] {

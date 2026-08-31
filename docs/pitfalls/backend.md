@@ -1,5 +1,12 @@
 # NestJS 后端坑点
 
+## AG-UI 客户端发送完整 RunAgentInput，DTO 白名单 400
+
+- **现象**：`POST /agui/chat` 400 `property tools should not exist; property context should not exist; property forwardedProps should not exist`
+- **根因**：标准 AG-UI 客户端（如 @ag-ui/client HttpAgent）会携带完整 RunAgentInput 字段（tools/context/forwardedProps），全局 ValidationPipe 开了 `forbidNonWhitelisted`，DTO 未声明的字段直接拒绝
+- **修复**：DTO 声明这三个可选字段（宽松类型，可不使用）；对接标准协议时 DTO 要覆盖协议全量字段，而非只声明用到的子集
+- **相关**：`apps/api/src/modules/chat/agui.controller.ts` AguiRunDto
+
 ## PATCH 接口的可空字段校验绕过：`if (value)` 挡不住显式传 null
 
 - **现象**：空间 update 接口传 `{"department_id": null}` 可绕过「必须挂部门」校验，把空间改成无部门，导致部门管理员看不到该空间的待审文档

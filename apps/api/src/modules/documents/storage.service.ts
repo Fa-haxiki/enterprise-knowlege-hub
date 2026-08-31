@@ -1,5 +1,6 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'crypto';
 import * as Minio from 'minio';
 import { v4 as uuid } from 'uuid';
 
@@ -48,7 +49,7 @@ export class StorageService implements OnModuleInit {
     return { fileKey: key, uploadId: uuid(), partUrls, partSize: PART_SIZE };
   }
 
-  /** 合并分片为最终对象 */
+  /** 合并分片为最终对象，并计算内容 sha256（用于防重复上传） */
   async completeMultipartUpload(fileKey: string, partCount: number) {
     const parts: Buffer[] = [];
     for (let i = 1; i <= partCount; i++) {
@@ -56,13 +57,14 @@ export class StorageService implements OnModuleInit {
       parts.push(await this.streamToBuffer(stream));
     }
     const merged = Buffer.concat(parts);
+    const contentHash = createHash('sha256').update(merged).digest('hex');
     await this.client.putObject(this.bucket, fileKey, merged, merged.length);
 
     // 清理分片
     for (let i = 1; i <= partCount; i++) {
       await this.client.removeObject(this.bucket, `${fileKey}.part${i}`).catch(() => undefined);
     }
-    return { fileKey, size: merged.length };
+    return { fileKey, size: merged.length, contentHash };
   }
 
   /** 浏览器可直接预览的 MIME 类型（其余一律附件下载） */

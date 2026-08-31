@@ -15,6 +15,7 @@ export interface ExtractedRelation {
 export interface ExtractionResult {
   entities: ExtractedEntity[];
   relations: ExtractedRelation[];
+  usage?: { prompt_tokens: number; completion_tokens: number };
 }
 
 const ENTITY_TYPES = ['Project', 'Supplier', 'Person', 'Policy', 'Department'];
@@ -27,7 +28,7 @@ export class EntityExtractor {
   constructor(private readonly llm: LlmService) {}
 
   async extract(text: string): Promise<ExtractionResult> {
-    const raw = await this.llm.invoke(
+    const { text: raw, usage } = await this.llm.invokeWithUsage(
       [
         new SystemMessage(
           '从文本中抽取企业知识图谱实体与关系。\n' +
@@ -38,7 +39,7 @@ export class EntityExtractor {
         ),
         new HumanMessage(text.slice(0, 6000)),
       ],
-      { temperature: 0 },
+      { temperature: 0, timeout: 120_000 },
     );
 
     try {
@@ -49,10 +50,11 @@ export class EntityExtractor {
         relations: (parsed.relations ?? []).filter(
           (r) => r.source && r.target && /^[A-Z_]+$/.test(r.relation),
         ),
+        usage,
       };
     } catch (e) {
       this.logger.warn(`entity extraction parse failed: ${(e as Error).message}`);
-      return { entities: [], relations: [] };
+      return { entities: [], relations: [], usage };
     }
   }
 }

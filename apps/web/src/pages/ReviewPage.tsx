@@ -25,6 +25,9 @@ export default function ReviewPage() {
   const [rejectingId, setRejectingId] = useState<string | null>(null);
   const [reason, setReason] = useState('');
   const [acting, setActing] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [batchRejecting, setBatchRejecting] = useState(false);
+  const [notice, setNotice] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -57,6 +60,43 @@ export default function ReviewPage() {
     }
   };
 
+  const toggle = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const toggleAll = () =>
+    setSelected((prev) => (prev.size === items.length ? new Set() : new Set(items.map((d) => d.id))));
+
+  /** 批量审核：通过后小文档自动走同步 embedding（秒级），大文档走 Batch */
+  const reviewBatch = async (approve: boolean, note?: string) => {
+    if (selected.size === 0 || acting) return;
+    setActing(true);
+    setNotice('');
+    try {
+      const res = await api.post<{
+        succeeded: number;
+        failed: number;
+        results: { document_id: string; ok: boolean; message?: string }[];
+      }>('/documents/review-batch', { ids: [...selected], approve, reason: note });
+      if (res.failed > 0) {
+        const names = res.results
+          .filter((r) => !r.ok)
+          .map((r) => items.find((d) => d.id === r.document_id)?.title ?? r.document_id);
+        setNotice(`成功 ${res.succeeded} 篇，失败 ${res.failed} 篇：${names.join('、')}`);
+      }
+      setSelected(new Set());
+      setBatchRejecting(false);
+      setReason('');
+      await load();
+    } finally {
+      setActing(false);
+    }
+  };
+
   return (
     <div className="h-full overflow-y-auto p-6">
       <div className="mx-auto max-w-4xl">
@@ -64,6 +104,63 @@ export default function ReviewPage() {
         <p className="mb-5 mt-1 text-sm text-ink-400">
           审核通过后文档才会解析入库；拒绝请填写理由，上传者可见
         </p>
+
+        {notice && (
+          <p className="mb-4 rounded-lg bg-amber-500/10 px-3 py-2 text-sm text-amber-600 dark:text-amber-400">
+            {notice}
+          </p>
+        )}
+
+        {!loading && items.length > 0 && (
+          <div className="mb-3 rounded-card border border-border bg-card px-4 py-2.5 shadow-card">
+            <div className="flex items-center gap-3">
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-ink-600">
+                <input
+                  type="checkbox"
+                  checked={selected.size === items.length && items.length > 0}
+                  onChange={toggleAll}
+                  className="h-4 w-4 accent-brand-600"
+                />
+                全选
+              </label>
+              <span className="text-xs text-ink-400">已选 {selected.size} / {items.length} 篇</span>
+              <div className="ml-auto flex items-center gap-1.5">
+                <button
+                  disabled={acting || selected.size === 0}
+                  onClick={() => void reviewBatch(true)}
+                  className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  批量通过{selected.size > 0 ? `（${selected.size}）` : ''}
+                </button>
+                <button
+                  disabled={acting || selected.size === 0}
+                  onClick={() => setBatchRejecting((v) => !v)}
+                  className="rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-500 transition-colors hover:bg-red-500/10 disabled:opacity-50"
+                >
+                  批量拒绝
+                </button>
+              </div>
+            </div>
+            {batchRejecting && (
+              <div className="mt-2.5 flex items-center gap-2 border-t border-border pt-2.5">
+                <input
+                  autoFocus
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  placeholder={`批量拒绝 ${selected.size} 篇的理由（必填，上传者可见）`}
+                  className="flex-1 rounded-lg border border-border bg-card px-3 py-1.5 text-sm outline-none transition-colors placeholder:text-ink-400 focus:border-red-400"
+                />
+                <button
+                  disabled={acting || !reason.trim()}
+                  onClick={() => void reviewBatch(false, reason.trim())}
+                  className="rounded-lg bg-red-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-red-600 disabled:opacity-50"
+                >
+                  确认拒绝
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         {loading ? (
           <div className="space-y-2.5">
@@ -83,6 +180,12 @@ export default function ReviewPage() {
             {items.map((d) => (
               <div key={d.id} className="rounded-card border border-border bg-card p-4 shadow-card">
                 <div className="flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(d.id)}
+                    onChange={() => toggle(d.id)}
+                    className="h-4 w-4 shrink-0 accent-brand-600"
+                  />
                   <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-amber-500/10 text-amber-600">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" />

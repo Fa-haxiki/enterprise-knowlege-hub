@@ -14,6 +14,7 @@ import { UserEntity } from './user.entity';
 
 @Entity('documents')
 @Index(['workspaceId', 'status'])
+@Index(['workspaceId', 'contentHash'])
 export class DocumentEntity {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -36,6 +37,10 @@ export class DocumentEntity {
 
   @Column({ name: 'file_size', type: 'bigint' })
   fileSize: number;
+
+  /** 文件内容 sha256：同空间防重复上传；历史数据为空由回填脚本补齐 */
+  @Column({ name: 'content_hash', type: 'varchar', length: 64, nullable: true })
+  contentHash: string | null;
 
   @Column({ type: 'varchar', length: 16, default: DocumentStatus.UPLOADED })
   status: DocumentStatus;

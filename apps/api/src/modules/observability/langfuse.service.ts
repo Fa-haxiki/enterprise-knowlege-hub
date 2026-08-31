@@ -97,6 +97,21 @@ export class LangfuseService {
     }
   }
 
+  /** 用户反馈打分：value 1=赞 0=踩，关联到问答 trace */
+  createScore(traceId: string | null | undefined, value: number, comment?: string) {
+    if (!this.client || !traceId) return;
+    try {
+      this.client.score({
+        traceId,
+        name: 'user_feedback',
+        value,
+        ...(comment ? { comment } : {}),
+      });
+    } catch (e) {
+      this.logger.warn(`score create failed: ${(e as Error).message}`);
+    }
+  }
+
   async shutdown() {
     await this.client?.shutdownAsync().catch((e) => this.logger.warn(e.message));
   }

@@ -258,6 +258,9 @@ importers:
       ioredis:
         specifier: ^5.4.2
         version: 5.11.1
+      langfuse:
+        specifier: 3.32.0
+        version: 3.32.0
       minio:
         specifier: ^8.0.2
         version: 8.0.7
@@ -2948,6 +2951,10 @@ packages:
 
   langfuse-core@3.38.20:
     resolution: {integrity: sha512-zBKVmQN/1oT5VWZUBYlWzvokIlkC/6mnpgr/2atMyTeAm+jR3ia7w2iJMjlrF5/oG8ukO1s8+LDRCzJpF1QeEA==}
+    engines: {node: '>=18'}
+
+  langfuse@3.32.0:
+    resolution: {integrity: sha512-Qto8+CW8ZulNaZ/gn4JgVe5v/yeKbvMyvQ/s2DXO5bP5o1PmqE6YOCHQ3Uep6W94B8kpXUgOHg7ZS5Wg8Xljsw==}
     engines: {node: '>=18'}
 
   langfuse@3.38.20:
@@ -7693,6 +7700,10 @@ snapshots:
   langfuse-core@3.38.20:
     dependencies:
       mustache: 4.2.0
+
+  langfuse@3.32.0:
+    dependencies:
+      langfuse-core: 3.38.20
 
   langfuse@3.38.20:
     dependencies:
