@@ -1,5 +1,6 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import type { Job } from 'bullmq';
@@ -12,9 +13,10 @@ import { EmbeddingService } from '@ekh/api/modules/llm/embedding.service';
 import { EsService } from '@ekh/api/modules/retrieval/es.service';
 import { GraphService } from '@ekh/api/modules/graph/graph.service';
 import { RedisService } from '@ekh/api/redis/redis.service';
+import { LangfuseService, type TraceHandle } from '@ekh/api/modules/observability/langfuse.service';
 import { MineruClient, type MineruResult } from '../pipelines/mineru.client';
 import { Chunker, type ChunkDraft } from '../pipelines/chunker';
-import { EntityExtractor } from '../pipelines/entity-extractor';
+import { EntityExtractor, type ExtractionResult } from '../pipelines/entity-extractor';
 
 interface IngestionJobData {
   documentId: string;
@@ -22,6 +24,9 @@ interface IngestionJobData {
 }
 
 const progressKey = (id: string) => `doc:progress:${id}`;
+
+/** 实体抽取并发度：LLM 调用是 graph 阶段瓶颈，4 路并发将 8 chunks 从 ~3.5min 压到 ~1min */
+const GRAPH_EXTRACT_CONCURRENCY = 4;
 
 /** 入库管线：MinerU 解析 → 语义分块 → Embedding + 双写索引 → 实体抽取建图 */
 @Processor('ingestion', { concurrency: 2 })
@@ -44,6 +49,8 @@ export class IngestionProcessor extends WorkerHost {
     private readonly es: EsService,
     private readonly graphDb: GraphService,
     private readonly redis: RedisService,
+    private readonly langfuse: LangfuseService,
+    private readonly config: ConfigService,
   ) {
     super();
   }
@@ -68,30 +75,40 @@ export class IngestionProcessor extends WorkerHost {
       return;
     }
 
+    const trace = this.langfuse.createTrace('document_ingestion', {
+      documentId: doc.id,
+      title: doc.title,
+      workspaceId: doc.workspaceId,
+    });
+
     try {
       // 1. MinerU 线上解析（异步轮询，期间续 BullMQ 锁）
       await this.transition(doc, DocumentStatus.PARSING, 5);
+      const parseSpan = this.langfuse.createSpan(trace, 'parse', { title: doc.title });
       const file = await this.storage.getObjectBuffer(doc.fileKey);
       const parsed = await this.mineru.parse(file, doc.title, () => {
         if (token) void job.extendLock(token, 60_000).catch(() => undefined);
       });
+      this.langfuse.endSpan(parseSpan, { pages: parsed.meta.pages, blocks: parsed.blocks.length });
       await this.trackJob(documentId, IngestionStage.PARSE, JobStatus.DONE);
 
       // 2. 语义分块
       await this.transition(doc, DocumentStatus.CHUNKING, 30);
+      const chunkSpan = this.langfuse.createSpan(trace, 'chunk', { blocks: parsed.blocks.length });
       const drafts = this.chunker.chunk(parsed.blocks);
+      this.langfuse.endSpan(chunkSpan, { chunks: drafts.length });
       await this.trackJob(documentId, IngestionStage.CHUNK, JobStatus.DONE);
       this.logger.log(`document ${documentId}: ${drafts.length} chunks`);
 
       // 3. Embedding（百炼 Batch API，异步轮询）+ PGVector/ES 双写
       await this.transition(doc, DocumentStatus.INDEXING, 50);
-      await this.indexChunks(doc, drafts, parsed, job, token);
+      await this.indexChunks(doc, drafts, parsed, job, token, trace);
       await this.trackJob(documentId, IngestionStage.INDEX, JobStatus.DONE);
 
       // 4. 实体抽取 + Neo4j 建图（失败不阻断 READY）
       await this.transition(doc, DocumentStatus.GRAPHING, 85);
       try {
-        await this.buildGraph(doc, drafts);
+        await this.buildGraph(doc, drafts, trace);
         await this.trackJob(documentId, IngestionStage.GRAPH, JobStatus.DONE);
       } catch (e) {
         this.logger.warn(`graph stage degraded: ${(e as Error).message}`);
@@ -99,9 +116,15 @@ export class IngestionProcessor extends WorkerHost {
       }
 
       await this.transition(doc, DocumentStatus.READY, 100);
+      trace?.update({ output: 'ready', metadata: { chunks: await this.chunks.countBy({ documentId: doc.id }) } });
     } catch (e) {
       const msg = (e as Error).message;
-      this.logger.error(`ingestion failed for ${documentId}: ${msg}`, (e as Error).stack);
+      const cause = (e as { cause?: { code?: string; message?: string } })?.cause;
+      this.logger.error(
+        `ingestion failed for ${documentId}: ${msg} cause=${cause?.code ?? ''} ${cause?.message ?? ''}`,
+        (e as Error).stack,
+      );
+      trace?.update({ output: 'failed', metadata: { error: msg } });
       await this.transition(doc, DocumentStatus.FAILED, null, msg);
       throw e; // 交给 BullMQ 重试（attempts=3 指数退避）
     }
@@ -114,13 +137,21 @@ export class IngestionProcessor extends WorkerHost {
     parsed: MineruResult,
     job: Job<IngestionJobData>,
     token?: string,
+    trace?: TraceHandle | null,
   ) {
     // 重建场景：先清旧数据
     await this.chunks.delete({ documentId: doc.id });
     await this.es.deleteByDocument(doc.id);
 
     const texts = drafts.map((d) => this.chunker.enrichForEmbedding(doc.title, d));
-    const vectors = texts.length > 0 ? await this.embedViaBatch(texts, job, token) : [];
+    // 按 chunk 数选通道：小批量走同步接口（秒级），大批量走 Batch API（半价异步）
+    const syncThreshold = this.config.get<number>('embedding.syncThreshold') ?? 20;
+    const vectors =
+      texts.length === 0
+        ? ([] as number[][])
+        : texts.length <= syncThreshold
+          ? await this.embedViaSync(texts, trace)
+          : await this.embedViaBatch(texts, job, token, trace);
 
     await this.dataSource.transaction(async (em) => {
       for (let i = 0; i < drafts.length; i++) {
@@ -156,11 +187,45 @@ export class IngestionProcessor extends WorkerHost {
     });
   }
 
+  /** 同步接口向量化：小批量场景秒级返回，免去 Batch 排队开销 */
+  private async embedViaSync(texts: string[], trace?: TraceHandle | null): Promise<number[][]> {
+    const generation = this.langfuse.createGeneration(trace ?? null, {
+      name: 'embedding_sync',
+      model: this.config.get<string>('embedding.model') ?? 'unknown',
+      input: { texts: texts.length },
+    });
+    try {
+      const { vectors, usage } = await this.embedding.embedWithUsage(texts);
+      this.langfuse.endGeneration(generation, {
+        output: `sync embed ${texts.length} texts`,
+        usage: { prompt_tokens: usage.prompt_tokens, completion_tokens: 0 },
+      });
+      this.logger.log(`sync embedding done: ${texts.length} texts, ${usage.prompt_tokens} tokens`);
+      return vectors;
+    } catch (e) {
+      this.langfuse.endGeneration(generation, {
+        output: `failed: ${(e as Error).message}`,
+        usage: { prompt_tokens: 0, completion_tokens: 0 },
+      });
+      throw e;
+    }
+  }
+
   /**
    * 百炼 Batch API 向量化：提交后每 15s 轮询，期间续 BullMQ 锁防 stalled；
    * 20 分钟未完成抛错走 BullMQ 重试（重建场景幂等：先清后写）
    */
-  private async embedViaBatch(texts: string[], job: Job<IngestionJobData>, token?: string): Promise<number[][]> {
+  private async embedViaBatch(
+    texts: string[],
+    job: Job<IngestionJobData>,
+    token?: string,
+    trace?: TraceHandle | null,
+  ): Promise<number[][]> {
+    const generation = this.langfuse.createGeneration(trace ?? null, {
+      name: 'embedding_batch',
+      model: this.config.get<string>('embedding.model') ?? 'unknown',
+      input: { texts: texts.length },
+    });
     const batchId = await this.embedding.submitEmbedBatch(texts);
     this.logger.log(`embedding batch ${batchId} submitted (${texts.length} texts), polling...`);
     const deadline = Date.now() + 20 * 60_000;
@@ -169,10 +234,17 @@ export class IngestionProcessor extends WorkerHost {
       if (token) await job.extendLock(token, 60_000).catch(() => undefined);
       const info = await this.embedding.getBatch(batchId);
       if (info.status === 'completed' && info.outputFileId) {
-        return this.embedding.downloadBatchVectors(info.outputFileId, texts.length);
+        const { vectors, usage } = await this.embedding.downloadBatchVectors(info.outputFileId, texts.length);
+        this.langfuse.endGeneration(generation, {
+          output: `batch ${batchId} completed`,
+          usage: { prompt_tokens: usage.prompt_tokens, completion_tokens: 0 },
+        });
+        return vectors;
       }
       if (info.status === 'failed' || info.status === 'expired' || info.status === 'cancelled') {
-        throw new Error(`embedding batch ${batchId} ${info.status}: ${info.error ?? 'unknown'}`);
+        const err = new Error(`embedding batch ${batchId} ${info.status}: ${info.error ?? 'unknown'}`);
+        this.langfuse.endGeneration(generation, { output: '', usage: { prompt_tokens: 0, completion_tokens: 0 } });
+        throw err;
       }
       if (Date.now() > deadline) {
         throw new Error(`embedding batch ${batchId} timeout after 20min (status=${info.status})`);
@@ -180,19 +252,69 @@ export class IngestionProcessor extends WorkerHost {
     }
   }
 
-  /** 实体抽取 + Neo4j 写入（按 chunk 批处理） */
-  private async buildGraph(doc: DocumentEntity, drafts: ChunkDraft[]) {
+  /**
+   * 实体抽取 + Neo4j 写入：4 路并发抽取（LLM 调用是瓶颈），单 chunk 失败仅跳过；
+   * 抽取完成后按 chunk 顺序批量写图；LLM 用量汇总为一条 generation（失败也落埋点）
+   */
+  private async buildGraph(doc: DocumentEntity, drafts: ChunkDraft[], trace?: TraceHandle | null) {
+    const span = this.langfuse.createSpan(trace ?? null, 'graph', { chunks: drafts.length });
+    const generation = this.langfuse.createGeneration(trace ?? null, {
+      name: 'entity_extract',
+      model: this.config.get<string>('llm.model') ?? 'unknown',
+      input: { chunks: drafts.length },
+    });
     const saved = await this.chunks.find({ where: { documentId: doc.id }, order: { chunkIndex: 'ASC' } });
-    for (let i = 0; i < drafts.length; i++) {
-      const result = await this.extractor.extract(drafts[i].content);
-      if (result.entities.length === 0 && result.relations.length === 0) continue;
-      await this.graphDb.upsertGraph({
-        chunkId: saved[i].id,
-        documentId: doc.id,
-        workspaceId: doc.workspaceId,
-        entities: result.entities,
-        relations: result.relations,
+
+    const results: (ExtractionResult | null)[] = new Array(drafts.length).fill(null);
+    let cursor = 0;
+    let failedChunks = 0;
+    const runWorker = async () => {
+      while (cursor < drafts.length) {
+        const i = cursor++;
+        try {
+          results[i] = await this.extractor.extract(drafts[i].content);
+        } catch (e) {
+          failedChunks++;
+          this.logger.warn(`chunk ${i} entity extract failed (skipped): ${(e as Error).message}`);
+        }
+      }
+    };
+
+    let entities = 0;
+    let relations = 0;
+    let promptTokens = 0;
+    let completionTokens = 0;
+    try {
+      await Promise.all(Array.from({ length: GRAPH_EXTRACT_CONCURRENCY }, () => runWorker()));
+
+      for (let i = 0; i < drafts.length; i++) {
+        const result = results[i];
+        if (!result) continue;
+        promptTokens += result.usage?.prompt_tokens ?? 0;
+        completionTokens += result.usage?.completion_tokens ?? 0;
+        if (result.entities.length === 0 && result.relations.length === 0) continue;
+        entities += result.entities.length;
+        relations += result.relations.length;
+        await this.graphDb.upsertGraph({
+          chunkId: saved[i].id,
+          documentId: doc.id,
+          workspaceId: doc.workspaceId,
+          entities: result.entities,
+          relations: result.relations,
+        });
+      }
+      this.langfuse.endGeneration(generation, {
+        output: `entities=${entities} relations=${relations} failedChunks=${failedChunks}`,
+        usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens },
       });
+      this.langfuse.endSpan(span, { entities, relations, failedChunks });
+    } catch (e) {
+      this.langfuse.endGeneration(generation, {
+        output: `failed: ${(e as Error).message}`,
+        usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens },
+      });
+      this.langfuse.endSpan(span, { entities, relations, failedChunks }, e as Error);
+      throw e;
     }
   }
 

@@ -40,6 +40,7 @@ export default function DocumentsPage() {
   const [loading, setLoading] = useState(true);
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [uploading, setUploading] = useState(false);
+  const [retrying, setRetrying] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState('');
   const [preview, setPreview] = useState<DocPreview | null>(null);
@@ -98,6 +99,18 @@ export default function DocumentsPage() {
     setUploading(true);
     setError('');
     try {
+      // 0. 内容查重预检：前端先算 sha256，命中重复则不上传
+      const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+      const contentHash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+      const dup = await api.post<{ duplicate: boolean; title: string | null }>(
+        `/workspaces/${workspaceId}/documents/check-duplicate`,
+        { content_hash: contentHash },
+      );
+      if (dup.duplicate) {
+        setError(`内容与已有文档《${dup.title}》重复，无需重复上传`);
+        return;
+      }
+
       // 1. 初始化分片上传
       const init = await api.post<{
         document_id: string;
@@ -151,6 +164,21 @@ export default function DocumentsPage() {
     if (!ok) return;
     await api.delete(`/documents/${id}`);
     await load();
+  };
+
+  // 失败重试：从头（解析阶段）完整重跑入库管线
+  const retry = async (id: string) => {
+    if (retrying) return;
+    setRetrying(id);
+    setError('');
+    try {
+      await api.post(`/documents/${id}/reindex?from_stage=parse`);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : '重试失败，请稍后再试');
+    } finally {
+      setRetrying(null);
+    }
   };
 
   return (
@@ -256,6 +284,30 @@ export default function DocumentsPage() {
                   <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ${st.className}`}>
                     {st.label}
                   </span>
+                  {doc.status === 'FAILED' && (
+                    <button
+                      onClick={() => void retry(doc.id)}
+                      disabled={retrying === doc.id}
+                      className="flex shrink-0 items-center gap-1 rounded-lg border border-brand-500/30 px-2.5 py-1 text-xs font-medium text-brand-600 transition-colors hover:bg-brand-600/10 disabled:opacity-50 dark:text-brand-400"
+                      title="从解析阶段重新入库"
+                    >
+                      <svg
+                        width="12"
+                        height="12"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        className={retrying === doc.id ? 'animate-spin' : ''}
+                      >
+                        <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                        <path d="M21 3v6h-6" />
+                      </svg>
+                      {retrying === doc.id ? '重试中' : '重试'}
+                    </button>
+                  )}
                   <button
                     onClick={() => remove(doc.id)}
                     className="shrink-0 rounded-lg p-1.5 text-ink-400 transition-colors hover:bg-red-500/10 hover:text-red-500"

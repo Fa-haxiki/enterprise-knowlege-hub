@@ -210,7 +210,7 @@ export class AgentService {
   }
 
   /** 查询改写：结合窗口摘要做指代消解 */
-  private async queryRewrite(state: AgentState): Promise<Partial<AgentState>> {
+  private async queryRewrite(state: AgentState, config: RunnableConfig): Promise<Partial<AgentState>> {
     if (state.windowMessages.length === 0 && !state.rollingSummary) {
       return { rewrittenQuery: state.query };
     }
@@ -221,17 +221,22 @@ export class AgentService {
       .filter(Boolean)
       .join('\n');
 
-    const rewritten = await this.llm.invoke(
-      [
-        new SystemMessage(
-          '你是查询改写器。结合对话历史，把用户最新问题改写为独立、完整、无指代的问题。' +
-            '若原问题已完整则原样输出。只输出改写后的问题本身，不要解释。',
-        ),
-        new HumanMessage(`对话历史：\n${history}\n\n最新问题：${state.query}`),
-      ],
-      { model: this.config.get<string>('llm.routerModel'), temperature: 0 },
-    );
-    return { rewrittenQuery: rewritten.trim() || state.query };
+    const messages = [
+      new SystemMessage(
+        '你是查询改写器。结合对话历史，把用户最新问题改写为独立、完整、无指代的问题。' +
+          '若原问题已完整则原样输出。只输出改写后的问题本身，不要解释。',
+      ),
+      new HumanMessage(`对话历史：\n${history}\n\n最新问题：${state.query}`),
+    ];
+    const model = this.config.get<string>('llm.routerModel');
+    const generation = this.langfuse.createGeneration(this.traceOf(config), {
+      name: 'query_rewrite',
+      model: model ?? 'unknown',
+      input: messages.map((m) => ({ role: m._getType(), content: String(m.content).slice(0, 2000) })),
+    });
+    const { text, usage } = await this.llm.invokeWithUsage(messages, { model, temperature: 0 });
+    this.langfuse.endGeneration(generation, { output: text.slice(0, 2000), usage });
+    return { rewrittenQuery: text.trim() || state.query };
   }
 
   /** step1: 复杂度路由 */
@@ -239,18 +244,23 @@ export class AgentService {
     state: AgentState,
     config: RunnableConfig,
   ): Promise<Partial<AgentState>> {
-    const raw = await this.llm.invoke(
-      [
-        new SystemMessage(
-          '判断用户问题是否需要「多实体关联推理」。\n' +
-            '- simple：单一事实查询、制度条款、定义类。例："差旅住宿标准是多少"\n' +
-            '- complex：涉及 ≥2 个实体的关系/链路/对比/追溯。例："A项目的供应商还服务了哪些项目"\n' +
-            '只输出 JSON：{"complexity":"simple"|"complex","entities":[{"name":"...","type":"Project|Supplier|Person|Policy|Department"}]}',
-        ),
-        new HumanMessage(state.rewrittenQuery),
-      ],
-      { model: this.config.get<string>('llm.routerModel'), temperature: 0 },
-    );
+    const messages = [
+      new SystemMessage(
+        '判断用户问题是否需要「多实体关联推理」。\n' +
+          '- simple：单一事实查询、制度条款、定义类。例："差旅住宿标准是多少"\n' +
+          '- complex：涉及 ≥2 个实体的关系/链路/对比/追溯。例："A项目的供应商还服务了哪些项目"\n' +
+          '只输出 JSON：{"complexity":"simple"|"complex","entities":[{"name":"...","type":"Project|Supplier|Person|Policy|Department"}]}',
+      ),
+      new HumanMessage(state.rewrittenQuery),
+    ];
+    const model = this.config.get<string>('llm.routerModel');
+    const generation = this.langfuse.createGeneration(this.traceOf(config), {
+      name: 'complexity_router',
+      model: model ?? 'unknown',
+      input: messages.map((m) => ({ role: m._getType(), content: String(m.content).slice(0, 2000) })),
+    });
+    const { text: raw, usage } = await this.llm.invokeWithUsage(messages, { model, temperature: 0 });
+    this.langfuse.endGeneration(generation, { output: raw.slice(0, 2000), usage });
 
     try {
       const parsed = JSON.parse(this.extractJson(raw)) as {

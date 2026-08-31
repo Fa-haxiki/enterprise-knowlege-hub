@@ -44,12 +44,14 @@ export default () => ({
     model: process.env.LLM_MODEL ?? 'deepseek-chat',
     routerModel: process.env.LLM_ROUTER_MODEL ?? process.env.LLM_MODEL ?? 'deepseek-chat',
   },
-  embedding: {
-    baseURL: process.env.EMBEDDING_BASE_URL ?? 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    apiKey: process.env.EMBEDDING_API_KEY ?? '',
-    model: process.env.EMBEDDING_MODEL ?? 'qwen3.7-text-embedding',
-    dim: parseInt(process.env.EMBEDDING_DIM ?? '1024', 10),
-  },
+        embedding: {
+          baseURL: process.env.EMBEDDING_BASE_URL ?? 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          apiKey: process.env.EMBEDDING_API_KEY ?? '',
+          model: process.env.EMBEDDING_MODEL ?? 'qwen3.7-text-embedding',
+          dim: parseInt(process.env.EMBEDDING_DIM ?? '1024', 10),
+          // 入库 embedding 通道阈值：chunk 数 ≤ 该值走同步接口（秒级），否则走 Batch API（半价异步）
+          syncThreshold: parseInt(process.env.EMBEDDING_SYNC_THRESHOLD ?? '20', 10),
+        },
   reranker: {
     url: process.env.RERANKER_URL ?? 'https://dashscope.aliyuncs.com/compatible-api/v1/reranks',
     apiKey: process.env.RERANKER_API_KEY ?? process.env.EMBEDDING_API_KEY ?? '',

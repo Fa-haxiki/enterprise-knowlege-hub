@@ -48,3 +48,10 @@
 - **根因**：`data-source.ts` 用 `__dirname + '../../../.env'`，从 `src/database` 出发只解析到 `apps/.env`（不存在），PG_PASSWORD 落空；API 的 ConfigModule 用的是 `process.cwd() + '../../.env'` 指向仓库根
 - **修复**：改为 `'../../../../.env'`（src/database 与 dist/database 到仓库根均为四级）
 - **相关**：`apps/api/src/database/data-source.ts`
+
+## worker 引用 @ekh/api 的模块时，其 npm 依赖需在 worker 自己的 package.json 声明
+
+- **现象**：worker 接入 LangfuseService 后运行时崩溃 `Error: Cannot find module 'langfuse'`，Require stack 指向 `apps/worker/dist/main.js`
+- **根因**：worker 直接 import `@ekh/api/modules/observability/langfuse.service`，webpack 构建时将 `langfuse` 标记为 external（在 api 的依赖里），运行时从 worker 的 node_modules 解析不到
+- **修复**：`pnpm --filter @ekh/worker add langfuse`（与 api 同版本）；跨包引用模块时，被引模块的 npm 依赖要在使用方 package.json 同步声明
+- **相关**：`apps/worker/package.json`、`apps/worker/src/worker.module.ts`

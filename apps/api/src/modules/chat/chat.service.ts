@@ -9,6 +9,7 @@ import { QaRecordEntity } from '../../database/entities/qa-record.entity';
 import { BizException } from '../../common/filters/http-exception.filter';
 import { MemoryService, type WindowMessage } from '../memory/memory.service';
 import { LlmService } from '../llm/llm.service';
+import { LangfuseService } from '../observability/langfuse.service';
 
 @Injectable()
 export class ChatService {
@@ -21,6 +22,7 @@ export class ChatService {
     private readonly qaRecords: Repository<QaRecordEntity>,
     private readonly memory: MemoryService,
     private readonly llm: LlmService,
+    private readonly langfuse: LangfuseService,
   ) {}
 
   async getOrCreateConversation(userId: string, conversationId: string | undefined, workspaceId?: string) {
@@ -177,6 +179,8 @@ export class ChatService {
         ...m,
         triples: record?.graphTriples ?? [],
         complexity: record?.complexity ?? null,
+        nodeLatencies: record?.nodeLatencies ?? null,
+        degradedNodes: record?.degradedNodes ?? [],
       };
     });
     return { total, page, page_size: pageSize, has_more: page * pageSize < total, items: enriched };
@@ -203,6 +207,9 @@ export class ChatService {
       throw new BizException(ErrorCode.NOT_FOUND, '消息不存在', 404);
     }
     await this.messages.update(messageId, { feedback, feedbackComment: comment ?? null });
+    // 上报 LangFuse score（1=赞 0=踩），关联问答 trace 用于质量看板
+    const record = await this.qaRecords.findOne({ where: { messageId } });
+    this.langfuse.createScore(record?.langfuseTraceId, feedback === 1 ? 1 : 0, comment);
     return { updated: true };
   }
 

@@ -44,6 +44,18 @@ class AguiRunDto {
     workspace_id?: string;
     enable_graph?: boolean;
   };
+
+  /** AG-UI 标准 RunAgentInput 字段：客户端会携带，声明以通过 DTO 白名单（暂不使用） */
+  @IsOptional()
+  @IsArray()
+  tools?: unknown[];
+
+  @IsOptional()
+  @IsArray()
+  context?: unknown[];
+
+  @IsOptional()
+  forwardedProps?: Record<string, unknown>;
 }
 
 /**

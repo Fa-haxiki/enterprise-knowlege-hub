@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { api } from '@/lib/api';
 import DocPreviewModal, { type DocPreview } from '@/components/DocPreviewModal';
 import AgentSteps from './AgentSteps';
+import ExecutionTrace from './ExecutionTrace';
 import MarkdownBody from './MarkdownBody';
 import type { Message } from './types';
 
@@ -178,7 +179,20 @@ export default function MessageItem({ message: m, playing, onFeedback, onSpeak }
       </div>
 
       <div className="min-w-0 flex-1 rounded-bubble rounded-tl-md border border-border bg-card px-4 py-3 text-sm leading-6 shadow-card">
-        {m.steps && m.steps.length > 0 && <AgentSteps steps={m.steps} />}
+        {/* 流式中：横向实时步骤条；完成后：纵向执行链路面板（历史消息由 node_latencies 重建） */}
+        {m.streaming
+          ? m.steps && m.steps.length > 0 && <AgentSteps steps={m.steps} />
+          : (m.steps?.length || m.nodeLatencies) && (
+              <ExecutionTrace
+                steps={m.steps}
+                nodeLatencies={m.nodeLatencies}
+                degraded={m.degradedNodes}
+                latencyMs={m.latencyMs}
+                tokens={
+                  (m.usage?.prompt_tokens ?? 0) + (m.usage?.completion_tokens ?? 0) || undefined
+                }
+              />
+            )}
 
         {m.complexity === 'complex' && !m.streaming && (
           <span className="mb-2 inline-flex items-center gap-1 rounded-full bg-brand-600/10 px-2 py-0.5 text-xs font-medium text-brand-600">

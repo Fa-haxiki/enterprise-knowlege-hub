@@ -26,6 +26,15 @@ export interface RunResult {
   complexity: 'simple' | 'complex' | null;
 }
 
+/** usage CUSTOM 事件：汇总耗时 / token / 各节点耗时 / 降级节点 */
+export interface UsageInfo {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  latency_ms?: number;
+  node_latencies?: Record<string, number>;
+  degraded?: string[];
+}
+
 export interface AguiHandlers {
   onStepStart(name: string): void;
   onStepEnd(name: string, latencyMs?: number, degraded?: boolean): void;
@@ -33,6 +42,7 @@ export interface AguiHandlers {
   onToken(delta: string): void;
   onCitation(c: Citation): void;
   onGraphPath(triples: Triple[]): void;
+  onUsage(u: UsageInfo): void;
   onFinished(result: RunResult): void;
   onError(message: string): void;
 }
@@ -83,6 +93,7 @@ export async function runChatAgent(args: {
           case EventType.CUSTOM:
             if (e.name === 'citation') h.onCitation(e.value as Citation);
             else if (e.name === 'graph_path') h.onGraphPath((e.value as { triples: Triple[] }).triples);
+            else if (e.name === 'usage') h.onUsage(e.value as UsageInfo);
             else if (e.name === 'status_detail') {
               const v = e.value as { stage: string; detail: string };
               h.onStatusDetail(v.stage, v.detail);

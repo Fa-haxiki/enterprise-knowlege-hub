@@ -1,5 +1,12 @@
 # 数据库与 TypeORM 坑点
 
+## TypeORM where 条件写 `field: undefined` 会被静默忽略
+
+- **现象**：软删文档仍出现在列表接口；再点删除时 `mustGet` 报 404「文档不存在」，前后表现矛盾
+- **根因**：查询条件写成 `where: { deletedAt: undefined }`，TypeORM 对值为 `undefined` 的条件直接丢弃（不报错），等于没有过滤
+- **修复**：软删过滤必须用 `deletedAt: IsNull()`；排查同类写法可全局搜 `: undefined` 检查是否落在 TypeORM where 中
+- **相关**：`apps/api/src/modules/documents/documents.service.ts` list / pendingReviewList
+
 ## TypeORM 无法推断 `string | null` 联合类型的列
 
 - **现象**：`Data type "Object" in "AuditLogEntity.userId" is not supported`

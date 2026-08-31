@@ -125,22 +125,39 @@ export class GraphService implements OnModuleInit, OnModuleDestroy {
          SET c.document_id = $documentId, c.workspace_id = $workspaceId`,
         { chunkId: payload.chunkId, documentId: payload.documentId, workspaceId: payload.workspaceId },
       );
+      // 实体按类型分组批量 MERGE（Cypher 标签不能参数化，按组拼标签 + UNWIND 批量）
+      const entitiesByType = new Map<string, string[]>();
       for (const e of payload.entities) {
+        entitiesByType.set(e.type, [...(entitiesByType.get(e.type) ?? []), e.name]);
+      }
+      for (const [type, names] of entitiesByType) {
         await session.run(
           `MATCH (c:Chunk {chunk_id: $chunkId})
-           MERGE (n:${e.type} {name: $name})
+           UNWIND $names AS name
+           MERGE (n:${type} {name: name})
            MERGE (c)-[:MENTIONS]->(n)`,
-          { chunkId: payload.chunkId, name: e.name },
+          { chunkId: payload.chunkId, names },
         );
       }
+      // 关系按「源类型|目标类型|关系类型」分组批量 MERGE；低置信关系进待审核（P2），不入图
+      const relGroups = new Map<string, { source: string; target: string; confidence: number }[]>();
       for (const r of payload.relations) {
-        if (r.confidence < 0.7) continue; // 低置信关系进待审核（P2），不入图
+        if (r.confidence < 0.7) continue;
+        const key = `${r.sourceType}|${r.targetType}|${r.relation}`;
+        relGroups.set(key, [
+          ...(relGroups.get(key) ?? []),
+          { source: r.source, target: r.target, confidence: r.confidence },
+        ]);
+      }
+      for (const [key, rows] of relGroups) {
+        const [sourceType, targetType, relation] = key.split('|');
         await session.run(
-          `MERGE (s:${r.sourceType} {name: $source})
-           MERGE (t:${r.targetType} {name: $target})
-           MERGE (s)-[rel:${r.relation}]->(t)
-           SET rel.source_chunk_id = $chunkId, rel.confidence = $confidence, rel.extracted_at = datetime()`,
-          { source: r.source, target: r.target, chunkId: payload.chunkId, confidence: r.confidence },
+          `UNWIND $rows AS row
+           MERGE (s:${sourceType} {name: row.source})
+           MERGE (t:${targetType} {name: row.target})
+           MERGE (s)-[rel:${relation}]->(t)
+           SET rel.source_chunk_id = $chunkId, rel.confidence = row.confidence, rel.extracted_at = datetime()`,
+          { rows, chunkId: payload.chunkId },
         );
       }
     } finally {

@@ -40,13 +40,24 @@ export class EmbeddingService {
 
   /** 同步批量 embed：超上限自动分批串行合并；校验返回维度 */
   async embed(texts: string[]): Promise<number[][]> {
-    if (texts.length === 0) return [];
+    const { vectors } = await this.embedWithUsage(texts);
+    return vectors;
+  }
+
+  /** 同步批量 embed（含 token 用量）：供 LangFuse generation 埋点使用 */
+  async embedWithUsage(
+    texts: string[],
+  ): Promise<{ vectors: number[][]; usage: { prompt_tokens: number } }> {
+    if (texts.length === 0) return { vectors: [], usage: { prompt_tokens: 0 } };
     const out: number[][] = [];
+    let promptTokens = 0;
     for (let i = 0; i < texts.length; i += SYNC_BATCH_LIMIT) {
       const batch = texts.slice(i, i + SYNC_BATCH_LIMIT);
-      out.push(...(await this.embedOnce(batch)));
+      const { vectors, usage } = await this.embedOnce(batch);
+      out.push(...vectors);
+      promptTokens += usage.prompt_tokens;
     }
-    return out;
+    return { vectors: out, usage: { prompt_tokens: promptTokens } };
   }
 
   async embedOne(text: string): Promise<number[]> {
@@ -54,7 +65,9 @@ export class EmbeddingService {
     return vec;
   }
 
-  private async embedOnce(texts: string[]): Promise<number[][]> {
+  private async embedOnce(
+    texts: string[],
+  ): Promise<{ vectors: number[][]; usage: { prompt_tokens: number } }> {
     const res = await fetch(`${this.baseURL}/embeddings`, {
       method: 'POST',
       headers: {
@@ -69,7 +82,10 @@ export class EmbeddingService {
       this.logger.error(`embedding failed: ${res.status} ${body}`);
       throw new Error(`embedding service error: ${res.status}`);
     }
-    const json = (await res.json()) as { data: { index: number; embedding: number[] }[] };
+    const json = (await res.json()) as {
+      data: { index: number; embedding: number[] }[];
+      usage?: { prompt_tokens?: number; total_tokens?: number };
+    };
     // OpenAI 兼容响应不保证顺序，按 index 归位
     const vectors = json.data
       .sort((a, b) => a.index - b.index)
@@ -82,7 +98,10 @@ export class EmbeddingService {
     if (vectors.length !== texts.length) {
       throw new Error(`embedding count mismatch: expect ${texts.length}, got ${vectors.length}`);
     }
-    return vectors;
+    return {
+      vectors,
+      usage: { prompt_tokens: json.usage?.prompt_tokens ?? json.usage?.total_tokens ?? 0 },
+    };
   }
 
   // ---------- Batch API（入库侧，半价；异步） ----------
@@ -165,8 +184,11 @@ export class EmbeddingService {
     };
   }
 
-  /** 下载 batch 结果：按 custom_id（提交时的索引）归位返回向量数组 */
-  async downloadBatchVectors(outputFileId: string, expectedCount: number): Promise<number[][]> {
+  /** 下载 batch 结果：按 custom_id（提交时的索引）归位返回向量数组与 token 用量汇总 */
+  async downloadBatchVectors(
+    outputFileId: string,
+    expectedCount: number,
+  ): Promise<{ vectors: number[][]; usage: { prompt_tokens: number } }> {
     const res = await fetch(`${this.baseURL}/files/${outputFileId}/content`, {
       headers: { Authorization: `Bearer ${this.apiKey}` },
       signal: AbortSignal.timeout(60_000),
@@ -178,11 +200,15 @@ export class EmbeddingService {
     }
     const text = await res.text();
     const vectors: number[][] = new Array(expectedCount);
+    let promptTokens = 0;
     for (const line of text.split('\n')) {
       if (!line.trim()) continue;
       const row = JSON.parse(line) as {
         custom_id: string;
-        response: { status_code: number; body: { data: { embedding: number[] }[] } };
+        response: {
+          status_code: number;
+          body: { data: { embedding: number[] }[]; usage?: { prompt_tokens?: number; total_tokens?: number } };
+        };
         error?: { message?: string };
       };
       const idx = Number(row.custom_id);
@@ -194,10 +220,11 @@ export class EmbeddingService {
         throw new Error(`batch item ${idx} dim invalid`);
       }
       vectors[idx] = vec;
+      promptTokens += row.response.body.usage?.prompt_tokens ?? row.response.body.usage?.total_tokens ?? 0;
     }
     if (vectors.some((v) => v === undefined)) {
       throw new Error(`batch result incomplete: expect ${expectedCount} vectors`);
     }
-    return vectors;
+    return { vectors, usage: { prompt_tokens: promptTokens } };
   }
 }
