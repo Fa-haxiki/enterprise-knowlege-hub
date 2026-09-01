@@ -9,9 +9,16 @@ interface ExecutionTraceProps {
   degraded?: string[];
   latencyMs?: number | null;
   tokens?: number;
+  /** 流式进行中：running 步骤显示 spinner，汇总行显示进度 */
+  streaming?: boolean;
 }
 
 function RowIcon({ status }: { status: AgentStep['status'] }) {
+  if (status === 'running') {
+    return (
+      <span className="inline-block h-3 w-3 shrink-0 animate-spin rounded-full border-[1.5px] border-brand-600/30 border-t-brand-600" />
+    );
+  }
   if (status === 'degraded') {
     return (
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="shrink-0 text-amber-500">
@@ -36,6 +43,7 @@ export default function ExecutionTrace({
   degraded,
   latencyMs,
   tokens,
+  streaming,
 }: ExecutionTraceProps) {
   const [collapsed, setCollapsed] = useState(false);
 
@@ -50,19 +58,20 @@ export default function ExecutionTrace({
         }));
 
   // 隐藏瞬时完成的内部节点（权限校验/加载对话等 <50ms），只展示有实际耗时的核心步骤；
-  // 并按真实执行顺序排序（node_latencies 的 key 顺序是 state 合并序，不可靠）
+  // 进行中的步骤无论耗时都展示；并按真实执行顺序排序（node_latencies 的 key 顺序是 state 合并序，不可靠）
   const orderOf = (name: string) => {
     const i = STEP_ORDER.indexOf(name);
     return i === -1 ? STEP_ORDER.length : i;
   };
   const rows = all
-    .filter((s) => (s.latencyMs ?? 0) >= 50)
+    .filter((s) => s.status === 'running' || (s.latencyMs ?? 0) >= 50)
     .sort((a, b) => orderOf(a.name) - orderOf(b.name));
 
   if (rows.length === 0) return null;
 
   const totalMs = latencyMs ?? rows.reduce((sum, r) => sum + (r.latencyMs ?? 0), 0);
   const hasDegraded = rows.some((r) => r.status === 'degraded');
+  const doneCount = rows.filter((r) => r.status !== 'running').length;
 
   return (
     <div className="mb-3 overflow-hidden rounded-xl border border-border bg-card">
@@ -101,6 +110,9 @@ export default function ExecutionTrace({
                   {STEP_LABELS[s.name] ?? s.name}
                 </span>
                 {s.status === 'degraded' && <span className="text-ink-400">（已降级）</span>}
+                {s.status === 'running' && s.detail && (
+                  <span className="truncate text-ink-400">{s.detail}</span>
+                )}
                 <span className="ml-auto tabular-nums text-ink-400">
                   {s.latencyMs != null ? `${(s.latencyMs / 1000).toFixed(1)}s` : ''}
                 </span>
@@ -108,13 +120,22 @@ export default function ExecutionTrace({
             ))}
           </div>
           <div className="mt-2 flex items-center gap-1.5 border-t border-border pt-2 text-xs text-ink-400">
-            {hasDegraded ? (
-              <span className="text-amber-600 dark:text-amber-400">部分降级</span>
+            {streaming ? (
+              <>
+                <span className="inline-block h-3 w-3 animate-spin rounded-full border-[1.5px] border-brand-600/30 border-t-brand-600" />
+                <span>执行中 · 已完成 {doneCount}/{rows.length} 步</span>
+              </>
             ) : (
-              <span className="text-emerald-600 dark:text-emerald-400">已完成</span>
+              <>
+                {hasDegraded ? (
+                  <span className="text-amber-600 dark:text-amber-400">部分降级</span>
+                ) : (
+                  <span className="text-emerald-600 dark:text-emerald-400">已完成</span>
+                )}
+                <span>· {(totalMs / 1000).toFixed(1)}s</span>
+                {tokens != null && tokens > 0 && <span>· {tokens} tokens</span>}
+              </>
             )}
-            <span>· {(totalMs / 1000).toFixed(1)}s</span>
-            {tokens != null && tokens > 0 && <span>· {tokens} tokens</span>}
           </div>
         </div>
       )}

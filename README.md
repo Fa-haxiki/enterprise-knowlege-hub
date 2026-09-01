@@ -88,7 +88,7 @@ flowchart TB
 | [docs/05-rag-pipeline.md](docs/05-rag-pipeline.md) | **核心**：LangGraph 状态机、混合检索 RRF、图谱多跳、分层记忆、Prompt 组装、LangFuse 埋点 |
 | [docs/06-security-permissions.md](docs/06-security-permissions.md) | 权限与安全：RBAC、权限白名单缓存、分片过滤、Prompt 注入防护 |
 | [docs/07-deployment.md](docs/07-deployment.md) | 部署运维：全组件 docker-compose、环境变量、资源规格、备份监控 |
-| [docs/08-roadmap.md](docs/08-roadmap.md) | 开发计划：M1-M3 里程碑、任务拆解、验收标准 |
+| [docs/08-roadmap.md](docs/08-roadmap.md) | 开发计划：M1-M3 里程碑、Backlog（含图谱实体类型演进） |
 | [docs/10-benchmark-report.md](docs/10-benchmark-report.md) | 性能压测报告：50 并发问答、入库吞吐、指标对照与归因 |
 | [docs/11-backup-restore-sop.md](docs/11-backup-restore-sop.md) | 备份恢复 SOP：四组件备份、恢复流程、降级预案、演练记录 |
 | [docs/12-ops-manual.md](docs/12-ops-manual.md) | 运维手册：生产部署、巡检告警、故障处置、安全基线、升级流程 |

@@ -89,6 +89,47 @@ gantt
 
 - SSO（OIDC/LDAP）、组织架构同步
 - 图谱维护台（实体合并、关系纠错）
+- **图谱实体类型演进**（封闭白名单的扩展 / 改名 / 合并，见下节）
 - 答案质量周报（自动汇总踩赞、low_recall 问题清单）
 - 多模态问答（图片/表格截图提问）
 - OpenSearch 替换 ES（若需更强聚合分析）
+
+## 图谱实体类型演进（P2）
+
+v1 图模型使用**封闭白名单**，不是业界通用清单。当前 5 类服务于 PRD 复杂问题「项目—供应商—负责人」以及制度/部门发文：
+
+`Project` / `Supplier` / `Person` / `Policy` / `Department`
+
+金额、日期、文件名、条款编号**不进图**（作为分片属性或检索字段）。类型过宽会放大抽取噪声，且 Neo4j 标签在 `MERGE (n:${type})` 中不可参数化，必须走白名单。
+
+### 原则
+
+1. **先问后加**：只为真实存在的多跳问题加类型，不为「看起来企业级」加满。
+2. **角色用关系，不叠加标签**：供应商 / 客户 / 合作方优先作为 `Organization` 上的关系，而不是各建一类节点。
+3. **三处同时改、已入库文档重抽**：白名单、问答路由 prompt、TypeScript 联合类型必须对齐；改完后对存量文档 `reindex?from_stage=graph`。
+
+### 候选变更（按需，不默认全做）
+
+| 变更 | 动机 | 不做的情况 |
+| --- | --- | --- |
+| `Supplier` → `Organization` | 覆盖客户、子公司、合作方；角色用 `SUPPLIES` / `CUSTOMER_OF` 等关系表达 | 文档与问题仍以「供应商」为主 |
+| 保留并补齐 `Person` / `Department` | 身份层底座；可与 HR / 组织架构同步衔接 | — |
+| 新增 `Contract` | 合同甲乙方、有效期、关联项目的多跳 | 合同只当附件检索、不问关系 |
+| 新增 `Product` / `Asset` / `System` | 产品线、IT 资产、系统依赖 | 制度/项目型知识库 |
+| 新增 `Location` | 多园区、属地制度 | 单地点组织 |
+| 不把每份 PDF 建成 `Document` 节点 | 文档已在 PostgreSQL；图上 `Chunk -[:MENTIONS]-> 实体` 即可溯源 | — |
+
+跨行业更稳的**身份层底座**是 `Person` / `Organization` / `Department`；`Project`、`Policy` 属于工作对象，按领域保留或替换。
+
+### 实现清单（变更时必做）
+
+| 位置 | 做什么 |
+| --- | --- |
+| `apps/worker/src/pipelines/entity-extractor.ts` | `ENTITY_TYPES` + 抽取 prompt + 过滤 |
+| `apps/api/src/modules/graph/graph.service.ts` | `ExtractedEntity.type` 联合类型 |
+| `apps/api/src/modules/agents/agent.service.ts` | `complexity_router` prompt 中的类型枚举 |
+| `docs/03-database-design.md` §3 | 节点表与关系示例 |
+| `docs/05-rag-pipeline.md` §3.1 / §8.3 | 抽取约束说明 |
+| 存量数据 | `POST /documents/:id/reindex?from_stage=graph`；旧标签节点需迁移或重建图 |
+
+验收：评估集中的复杂问题分类与多跳仍达标；抽到白名单外的类型继续丢弃；LangFuse `graph` span 可看到新类型实体数。

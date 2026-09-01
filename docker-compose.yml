@@ -75,7 +75,9 @@ services:
     volumes:
       - miniodata:/data
     ports:
-      - "127.0.0.1:9000:9000"
+      # 9000 绑所有网卡：局域网同事的浏览器直连此端口完成上传/预览（预签名 URL 指向它）
+      - "9000:9000"
+      # 控制台仍只绑回环，避免暴露管理面
       - "127.0.0.1:9001:9001"
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]

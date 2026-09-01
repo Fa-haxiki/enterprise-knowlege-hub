@@ -33,6 +33,9 @@ export class EntityExtractor {
         new SystemMessage(
           '从文本中抽取企业知识图谱实体与关系。\n' +
             `实体类型限于：${ENTITY_TYPES.join('/')}。\n` +
+            '实体名称统一使用中文规范名（如 Finance → 财务部、HR → 人力资源部）；' +
+            '仅当实体在原文中没有中文对应（如 ERP、OKR 等通用缩写）时保留原文；' +
+            '同一实体的中英文/全称简称等不同写法必须合并为同一个中文规范名。\n' +
             '关系类型用大写下划线英文动词，如 USES_SUPPLIER / OWNED_BY / GOVERNED_BY / PUBLISHES / SERVES。\n' +
             '只输出 JSON：{"entities":[{"name","type"}],"relations":[{"source","sourceType","target","targetType","relation","confidence"}]}。\n' +
             'confidence 取 0-1；无内容可抽取时输出 {"entities":[],"relations":[]}。',

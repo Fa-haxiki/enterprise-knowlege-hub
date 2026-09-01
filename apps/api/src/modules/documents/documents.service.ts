@@ -149,8 +149,8 @@ export class DocumentsService {
     return { results, succeeded, failed: results.length - succeeded };
   }
 
-  /** 待审核列表：我作为审核员的部门下的待审核文档；sysadmin 另含未挂部门的 */
-  async pendingReviewList(user: AuthUser) {
+  /** 待审核列表（分页）：我作为审核员的部门下的待审核文档；sysadmin 另含未挂部门的 */
+  async pendingReviewList(user: AuthUser, page = 1, pageSize = 10) {
     const departmentIds = await this.acl.adminDepartmentIds(user.userId);
     const wsRows = await this.workspaces.find();
     const depOf = new Map(wsRows.map((w) => [w.id, w.departmentId]));
@@ -161,14 +161,16 @@ export class DocumentsService {
           : user.role === SystemRole.SYSADMIN,
       )
       .map((w) => w.id);
-    if (inScope.length === 0) return { items: [] };
-    const items = await this.documents.find({
+    if (inScope.length === 0) return { items: [], total: 0, page, page_size: pageSize };
+    const [rows, total] = await this.documents.findAndCount({
       where: { workspaceId: In(inScope), status: DocumentStatus.PENDING_REVIEW, deletedAt: IsNull() },
       relations: { uploader: true, workspace: true },
       order: { createdAt: 'ASC' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
     });
     return {
-      items: items.map((d) => ({
+      items: rows.map((d) => ({
         id: d.id,
         title: d.title,
         mime_type: d.mimeType,
@@ -178,16 +180,62 @@ export class DocumentsService {
         workspace: { id: d.workspace.id, name: d.workspace.name, department_id: depOf.get(d.workspaceId) },
         uploader: { id: d.uploader.id, name: d.uploader.name, email: d.uploader.email },
       })),
+      total,
+      page,
+      page_size: pageSize,
     };
   }
 
-  async list(workspaceId: string, page = 1, pageSize = 20) {
-    const [items, total] = await this.documents.findAndCount({
-      where: { workspaceId, deletedAt: IsNull() },
-      order: { createdAt: 'DESC' },
-      skip: (page - 1) * pageSize,
-      take: pageSize,
-    });
+  /** 文档类型筛选 → mimeType 映射（上传时由浏览器 file.type 落库） */
+  private static readonly TYPE_MIME: Record<string, string[]> = {
+    pdf: ['application/pdf'],
+    word: ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/msword'],
+    excel: ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel'],
+    ppt: ['application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.ms-powerpoint'],
+    md: ['text/markdown'],
+    txt: ['text/plain'],
+    html: ['text/html'],
+  };
+
+  /** 处理中状态集合：筛选「处理中」时展开 */
+  private static readonly PROCESSING_STATUS = ['UPLOADED', 'PARSING', 'CHUNKING', 'INDEXING', 'GRAPHING'];
+
+  async list(
+    workspaceId: string,
+    page = 1,
+    pageSize = 20,
+    filters?: { keyword?: string; status?: string; type?: string; dateFrom?: string; dateTo?: string },
+  ) {
+    const qb = this.documents
+      .createQueryBuilder('d')
+      .where('d.workspace_id = :workspaceId', { workspaceId })
+      .andWhere('d.deleted_at IS NULL')
+      .orderBy('d.created_at', 'DESC')
+      .skip((page - 1) * pageSize)
+      .take(pageSize);
+    if (filters?.keyword) {
+      qb.andWhere('d.title ILIKE :kw', { kw: `%${filters.keyword}%` });
+    }
+    if (filters?.status) {
+      if (filters.status === 'PROCESSING') {
+        qb.andWhere('d.status IN (:...sts)', { sts: DocumentsService.PROCESSING_STATUS });
+      } else {
+        qb.andWhere('d.status = :st', { st: filters.status });
+      }
+    }
+    if (filters?.type && DocumentsService.TYPE_MIME[filters.type]) {
+      qb.andWhere('d.mime_type IN (:...mimes)', { mimes: DocumentsService.TYPE_MIME[filters.type] });
+    }
+    if (filters?.dateFrom) {
+      qb.andWhere('d.created_at >= :df', { df: filters.dateFrom });
+    }
+    if (filters?.dateTo) {
+      // 结束日期含当天：取次日零点前
+      const end = new Date(filters.dateTo);
+      end.setDate(end.getDate() + 1);
+      qb.andWhere('d.created_at < :dt', { dt: end.toISOString() });
+    }
+    const [items, total] = await qb.getManyAndCount();
     return {
       total,
       page,

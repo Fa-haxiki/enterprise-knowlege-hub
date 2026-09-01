@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import DocPreviewModal, { type DocPreview } from '@/components/DocPreviewModal';
+import Pagination from '@/components/Pagination';
+
+const PAGE_SIZE = 10;
 
 interface PendingDoc {
   id: string;
@@ -20,6 +23,8 @@ function formatSize(bytes: number) {
 
 export default function ReviewPage() {
   const [items, setItems] = useState<PendingDoc[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [preview, setPreview] = useState<DocPreview | null>(null);
   const [rejectingId, setRejectingId] = useState<string | null>(null);
@@ -29,19 +34,34 @@ export default function ReviewPage() {
   const [batchRejecting, setBatchRejecting] = useState(false);
   const [notice, setNotice] = useState('');
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (p = page) => {
     setLoading(true);
     try {
-      const d = await api.get<{ items: PendingDoc[] }>('/documents/pending-review');
+      const d = await api.get<{ items: PendingDoc[]; total: number }>(
+        `/documents/pending-review?page=${p}&page_size=${PAGE_SIZE}`,
+      );
       setItems(d.items);
+      setTotal(d.total);
+      // 审核完当前页最后一条时回退一页，避免停在空页
+      if (d.items.length === 0 && d.total > 0 && p > 1) {
+        setPage(p - 1);
+        await load(p - 1);
+      }
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [page]);
 
   useEffect(() => {
     void load();
-  }, [load]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const goPage = (p: number) => {
+    setPage(p);
+    setSelected(new Set());
+    void load(p);
+  };
 
   const openPreview = async (docId: string) => {
     const doc = await api.get<DocPreview>(`/documents/${docId}/download-url`);
@@ -244,6 +264,14 @@ export default function ReviewPage() {
             ))}
           </div>
         )}
+
+        <Pagination
+          page={page}
+          total={total}
+          pageSize={PAGE_SIZE}
+          onChange={goPage}
+          totalLabel={`共 ${total} 篇待审核`}
+        />
 
         {preview && <DocPreviewModal doc={preview} onClose={() => setPreview(null)} />}
       </div>

@@ -24,6 +24,8 @@ export interface RunResult {
   message_id: string;
   conversation_id: string;
   complexity: 'simple' | 'complex' | null;
+  /** 会话标题（新会话为自动生成的标题），用于前端本地更新侧边栏 */
+  title?: string;
 }
 
 /** usage CUSTOM 事件：汇总耗时 / token / 各节点耗时 / 降级节点 */

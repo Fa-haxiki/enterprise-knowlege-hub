@@ -8,6 +8,7 @@ import { DepartmentEntity } from '../../database/entities/department.entity';
 import { DepartmentAdminEntity } from '../../database/entities/department-admin.entity';
 import { DepartmentMemberEntity } from '../../database/entities/department-member.entity';
 import { AuditService } from '../audit/audit.service';
+import { AclService } from '../workspaces/acl.service';
 import { BizException } from '../../common/filters/http-exception.filter';
 
 @Injectable()
@@ -22,6 +23,7 @@ export class AdminService {
     @InjectRepository(DepartmentMemberEntity)
     private readonly deptMembers: Repository<DepartmentMemberEntity>,
     private readonly audit: AuditService,
+    private readonly acl: AclService,
   ) {}
 
   // ---------- 用户管理 ----------
@@ -156,30 +158,51 @@ export class AdminService {
 
   // ---------- 部门管理 ----------
 
+  /** 部门列表（轻量）：只带人数统计，成员明细由 getDepartmentDetail 按需加载 */
   async listDepartments() {
     const deps = await this.departments.find({ order: { createdAt: 'ASC' } });
-    const admins = await this.deptAdmins.find({ relations: { user: true } });
-    const members = await this.deptMembers.find({ relations: { user: true } });
-    const group = (rows: (DepartmentAdminEntity | DepartmentMemberEntity)[]) => {
-      const map = new Map<string, { id: string; name: string; email: string; disabled: boolean }[]>();
-      for (const r of rows) {
-        const list = map.get(r.departmentId) ?? [];
-        list.push({ id: r.user.id, name: r.user.name, email: r.user.email, disabled: !!r.user.disabledAt });
-        map.set(r.departmentId, list);
-      }
-      return map;
+    const countBy = async (repo: Repository<DepartmentAdminEntity | DepartmentMemberEntity>) => {
+      const rows = await repo
+        .createQueryBuilder('r')
+        .select('r.department_id', 'dep_id')
+        .addSelect('COUNT(*)', 'cnt')
+        .groupBy('r.department_id')
+        .getRawMany<{ dep_id: string; cnt: string }>();
+      return new Map(rows.map((r) => [r.dep_id, parseInt(r.cnt, 10)]));
     };
-    const adminsByDep = group(admins);
-    const membersByDep = group(members);
+    const [adminCnt, memberCnt] = await Promise.all([countBy(this.deptAdmins), countBy(this.deptMembers)]);
     return {
       items: deps.map((d) => ({
         id: d.id,
         name: d.name,
         description: d.description,
-        admins: adminsByDep.get(d.id) ?? [],
-        members: membersByDep.get(d.id) ?? [],
+        admin_count: adminCnt.get(d.id) ?? 0,
+        member_count: memberCnt.get(d.id) ?? 0,
         created_at: d.createdAt,
       })),
+    };
+  }
+
+  /** 部门详情：含管理员与成员列表（点击部门时按需加载） */
+  async getDepartmentDetail(id: string) {
+    const dep = await this.mustGetDepartment(id);
+    const pick = (r: DepartmentAdminEntity | DepartmentMemberEntity) => ({
+      id: r.user.id,
+      name: r.user.name,
+      email: r.user.email,
+      disabled: !!r.user.disabledAt,
+    });
+    const [admins, members] = await Promise.all([
+      this.deptAdmins.find({ where: { departmentId: id }, relations: { user: true } }),
+      this.deptMembers.find({ where: { departmentId: id }, relations: { user: true } }),
+    ]);
+    return {
+      id: dep.id,
+      name: dep.name,
+      description: dep.description,
+      admins: admins.map(pick),
+      members: members.map(pick),
+      created_at: dep.createdAt,
     };
   }
 
@@ -215,6 +238,7 @@ export class AdminService {
     await this.mustGetDepartment(departmentId);
     await this.mustGetUser(userId);
     await this.deptAdmins.save(this.deptAdmins.create({ departmentId, userId, grantedBy: adminId }));
+    await this.acl.invalidate(userId);
     this.audit.record({
       userId: adminId,
       action: 'dept_admin_add',
@@ -227,6 +251,7 @@ export class AdminService {
 
   async removeDepartmentAdmin(adminId: string, departmentId: string, userId: string) {
     await this.deptAdmins.delete({ departmentId, userId });
+    await this.acl.invalidate(userId);
     this.audit.record({
       userId: adminId,
       action: 'dept_admin_remove',

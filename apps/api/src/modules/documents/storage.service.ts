@@ -10,6 +10,8 @@ const PRESIGN_EXPIRY = 3600;
 @Injectable()
 export class StorageService implements OnModuleInit {
   private client: Minio.Client;
+  /** 预签名专用 client：endpoint 用对外地址（S3 V4 签名含 host，不能用内部 client 签完再换 host） */
+  private presignClient: Minio.Client;
   private bucket: string;
 
   constructor(private readonly config: ConfigService) {}
@@ -22,6 +24,16 @@ export class StorageService implements OnModuleInit {
       accessKey: this.config.get<string>('minio.accessKey') ?? '',
       secretKey: this.config.get<string>('minio.secretKey') ?? '',
     });
+    const publicEndPoint = this.config.get<string>('minio.publicEndPoint');
+    this.presignClient = publicEndPoint
+      ? new Minio.Client({
+          endPoint: publicEndPoint,
+          port: this.config.get<number>('minio.publicPort'),
+          useSSL: this.config.get<boolean>('minio.useSSL') ?? false,
+          accessKey: this.config.get<string>('minio.accessKey') ?? '',
+          secretKey: this.config.get<string>('minio.secretKey') ?? '',
+        })
+      : this.client;
     this.bucket = this.config.get<string>('minio.bucket') ?? 'ekh-docs';
 
     const exists = await this.client.bucketExists(this.bucket).catch(() => false);
@@ -39,7 +51,7 @@ export class StorageService implements OnModuleInit {
     // MinIO SDK 的分片上传通过 S3 协议；预签名 URL 按单分片 PUT 生成
     const partUrls: string[] = [];
     for (let i = 1; i <= partCount; i++) {
-      const url = await this.client.presignedPutObject(
+      const url = await this.presignClient.presignedPutObject(
         this.bucket,
         `${key}.part${i}`,
         PRESIGN_EXPIRY,
@@ -84,7 +96,7 @@ export class StorageService implements OnModuleInit {
     const inline = mimeType ? StorageService.INLINE_MIME.has(mimeType) : false;
     const encoded = encodeURIComponent(filename ?? 'download');
     const disposition = `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encoded}`;
-    return this.client.presignedGetObject(this.bucket, fileKey, expirySeconds, {
+    return this.presignClient.presignedGetObject(this.bucket, fileKey, expirySeconds, {
       'response-content-disposition': disposition,
       // 对象上传时 Content-Type 多为 octet-stream，不覆盖则浏览器无视 inline 直接下载
       'response-content-type': mimeType ?? 'application/octet-stream',

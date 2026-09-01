@@ -1,6 +1,7 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { api, ApiError } from '@/lib/api';
 import MemberList, { type MemberPerson } from '@/components/MemberList';
+import Pagination from '@/components/Pagination';
 import { useConfirm } from '@/components/ConfirmDialog';
 
 interface AdminUser {
@@ -15,7 +16,18 @@ interface AdminUser {
   created_at: string;
 }
 
+/** 部门列表项（轻量）：只带人数统计 */
 interface Department {
+  id: string;
+  name: string;
+  description: string | null;
+  admin_count: number;
+  member_count: number;
+  created_at: string;
+}
+
+/** 部门详情：点击时按需加载，含管理员与成员列表 */
+interface DepartmentDetail {
   id: string;
   name: string;
   description: string | null;
@@ -68,6 +80,8 @@ export default function AdminPage() {
 
 /* ---------------- 用户管理 ---------------- */
 
+const PAGE_SIZE = 10;
+
 function UsersPanel() {
   const [items, setItems] = useState<AdminUser[]>([]);
   const [total, setTotal] = useState(0);
@@ -83,7 +97,7 @@ function UsersPanel() {
   const load = useCallback(async (p = page, st = status, kw = keyword) => {
     setLoading(true);
     try {
-      const q = new URLSearchParams({ page: String(p), page_size: '20' });
+      const q = new URLSearchParams({ page: String(p), page_size: String(PAGE_SIZE) });
       if (st) q.set('status', st);
       if (kw.trim()) q.set('keyword', kw.trim());
       const d = await api.get<{ items: AdminUser[]; total: number }>(`/admin/users?${q}`);
@@ -105,7 +119,10 @@ function UsersPanel() {
     await load();
   };
 
-  const totalPages = Math.max(1, Math.ceil(total / 20));
+  const goPage = (p: number) => {
+    setPage(p);
+    void load(p);
+  };
 
   return (
     <div className="rounded-card border border-border bg-card shadow-card">
@@ -297,33 +314,9 @@ function UsersPanel() {
         </div>
       )}
 
-      {totalPages > 1 && (
-        <div className="flex items-center justify-center gap-2 border-t border-border p-3 text-xs text-ink-400">
-          <button
-            disabled={page <= 1}
-            onClick={() => {
-              setPage(page - 1);
-              void load(page - 1);
-            }}
-            className="rounded-md px-2 py-1 hover:bg-subtle disabled:opacity-40"
-          >
-            上一页
-          </button>
-          <span>
-            {page} / {totalPages}
-          </span>
-          <button
-            disabled={page >= totalPages}
-            onClick={() => {
-              setPage(page + 1);
-              void load(page + 1);
-            }}
-            className="rounded-md px-2 py-1 hover:bg-subtle disabled:opacity-40"
-          >
-            下一页
-          </button>
-        </div>
-      )}
+      <div className="border-t border-border px-3">
+        <Pagination page={page} total={total} pageSize={PAGE_SIZE} onChange={goPage} totalLabel={`共 ${total} 人`} />
+      </div>
       {confirmDialog}
     </div>
   );
@@ -428,10 +421,15 @@ function DepartmentsPanel() {
   const [items, setItems] = useState<Department[]>([]);
   const [allUsers, setAllUsers] = useState<AdminUser[]>([]);
   const [loading, setLoading] = useState(true);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<DepartmentDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [error, setError] = useState('');
 
+  /** 部门列表（轻量，含人数统计）+ 候选用户（添加成员用） */
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -441,14 +439,40 @@ function DepartmentsPanel() {
       ]);
       setItems(deps.items);
       setAllUsers(users.items);
+      // 保持选中态；选中项被删则回落到第一个
+      setSelectedId((prev) =>
+        prev && deps.items.some((d) => d.id === prev) ? prev : (deps.items[0]?.id ?? null),
+      );
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  /** 选中部门的成员详情：点击时才请求 */
+  const loadDetail = useCallback(async (id: string) => {
+    setDetailLoading(true);
+    try {
+      setDetail(await api.get<DepartmentDetail>(`/admin/departments/${id}`));
+    } finally {
+      setDetailLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (selectedId) void loadDetail(selectedId);
+    else setDetail(null);
+  }, [selectedId, loadDetail]);
+
+  /** 成员操作后：刷新详情（成员列表）与左栏统计 */
+  const reload = async () => {
+    if (selectedId) await loadDetail(selectedId);
+    const deps = await api.get<{ items: Department[] }>('/admin/departments');
+    setItems(deps.items);
+  };
 
   const create = async (e: FormEvent) => {
     e.preventDefault();
@@ -457,6 +481,7 @@ function DepartmentsPanel() {
       await api.post('/admin/departments', { name, description: description || undefined });
       setName('');
       setDescription('');
+      setShowCreate(false);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : '创建失败');
@@ -464,52 +489,132 @@ function DepartmentsPanel() {
   };
 
   return (
-    <div>
-      <form onSubmit={create} className="mb-5 flex flex-wrap gap-2 rounded-card border border-border bg-card p-4 shadow-card">
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="部门名称"
-          required
-          className={`${inputCls} w-48`}
-        />
-        <input
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          placeholder="描述（可选）"
-          className={`${inputCls} flex-1 min-w-48`}
-        />
-        <button type="submit" className="rounded-lg bg-brand-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-brand-700">
-          新建部门
-        </button>
-        {error && <p className="w-full text-xs text-red-500">{error}</p>}
-      </form>
-
-      {loading ? (
-        <div className="space-y-3">
-          {Array.from({ length: 2 }).map((_, i) => (
-            <div key={i} className="skeleton h-40 rounded-card" />
-          ))}
+    <div className="flex gap-4" style={{ height: 'calc(100vh - 210px)' }}>
+      {/* 左栏：部门列表（内部滚动，页面不随部门数变长） */}
+      <div className="flex w-60 shrink-0 flex-col rounded-card border border-border bg-card shadow-card">
+        <div className="border-b border-border p-3">
+          <button
+            onClick={() => {
+              setShowCreate(true);
+              setError('');
+            }}
+            className="w-full rounded-lg border border-dashed border-border px-3 py-2 text-sm text-ink-600 transition-colors hover:border-brand-500/50 hover:text-brand-700"
+          >
+            + 新建部门
+          </button>
         </div>
-      ) : (
-        <div className="space-y-4">
-          {items.map((d) => (
-            <DepartmentAdminCard
-              key={d.id}
-              dep={d}
-              allUsers={allUsers}
-              onAction={async (fn) => {
-                await fn();
-                await load();
-              }}
-              onDelete={() => void api.delete(`/admin/departments/${d.id}`).then(load)}
-            />
-          ))}
-          {items.length === 0 && (
-            <p className="rounded-card border border-dashed border-border py-12 text-center text-sm text-ink-400">
-              还没有部门，先创建一个
-            </p>
+        <div className="flex-1 overflow-y-auto p-2">
+          {loading ? (
+            <div className="space-y-2 p-1">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="skeleton h-10 rounded-lg" />
+              ))}
+            </div>
+          ) : (
+            items.map((d) => (
+              <button
+                key={d.id}
+                onClick={() => setSelectedId(d.id)}
+                className={`mb-1 flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-left text-sm transition-colors ${
+                  d.id === selectedId
+                    ? 'bg-brand-600/10 font-medium text-brand-700'
+                    : 'text-ink-600 hover:bg-subtle'
+                }`}
+              >
+                <span className="truncate">{d.name}</span>
+                <span className="ml-2 shrink-0 text-xs text-ink-400">{d.member_count} 人</span>
+              </button>
+            ))
           )}
+          {!loading && items.length === 0 && (
+            <p className="py-10 text-center text-xs text-ink-400">还没有部门，先创建一个</p>
+          )}
+        </div>
+      </div>
+
+      {/* 右栏：选中部门详情，成员区内部滚动 */}
+      <div className="min-w-0 flex-1 overflow-y-auto">
+        {detailLoading ? (
+          <div className="space-y-3 rounded-card border border-border bg-card p-4 shadow-card">
+            <div className="skeleton h-6 w-48 rounded" />
+            <div className="skeleton h-32 rounded-lg" />
+          </div>
+        ) : detail ? (
+          <DepartmentAdminCard
+            dep={detail}
+            allUsers={allUsers}
+            onAction={async (fn) => {
+              await fn();
+              await reload();
+            }}
+            onDelete={() =>
+              void api.delete(`/admin/departments/${detail.id}`).then(() => {
+                setSelectedId(null);
+                void load();
+              })
+            }
+          />
+        ) : (
+          !loading && (
+            <p className="rounded-card border border-dashed border-border py-16 text-center text-sm text-ink-400">
+              选择左侧部门查看成员
+            </p>
+          )
+        )}
+      </div>
+
+      {showCreate && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setShowCreate(false)}
+        >
+          <form
+            onSubmit={create}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm rounded-card border border-border bg-card p-5 shadow-pop"
+          >
+            <h2 className="mb-4 text-base font-semibold text-ink-900">新建部门</h2>
+            <label className="mb-3 block">
+              <span className="mb-1 block text-xs text-ink-400">部门名称</span>
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="如：财务部"
+                required
+                autoFocus
+                className={`${inputCls} w-full`}
+              />
+            </label>
+            <label className="mb-4 block">
+              <span className="mb-1 block text-xs text-ink-400">描述（可选）</span>
+              <input
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="部门职责说明"
+                className={`${inputCls} w-full`}
+              />
+            </label>
+            {error && (
+              <p className="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
+                {error}
+              </p>
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowCreate(false)}
+                className="rounded-lg border border-border px-4 py-2 text-sm text-ink-600 transition-colors hover:bg-subtle"
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-brand-700"
+              >
+                创建
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </div>
@@ -523,7 +628,7 @@ function DepartmentAdminCard({
   onAction,
   onDelete,
 }: {
-  dep: Department;
+  dep: DepartmentDetail;
   allUsers: AdminUser[];
   onAction: (fn: () => Promise<unknown>) => Promise<void>;
   onDelete: () => void;
@@ -531,6 +636,29 @@ function DepartmentAdminCard({
   const adminCandidates = allUsers.filter((u) => !dep.admins.some((a) => a.id === u.id));
   const memberCandidates = allUsers.filter((u) => !dep.members.some((m) => m.id === u.id));
   const { confirm, confirmDialog } = useConfirm();
+  const [editing, setEditing] = useState(false);
+  const [editName, setEditName] = useState(dep.name);
+  const [editDesc, setEditDesc] = useState(dep.description ?? '');
+  const [editError, setEditError] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const saveEdit = async (e: FormEvent) => {
+    e.preventDefault();
+    setSaving(true);
+    setEditError('');
+    try {
+      await api.patch(`/admin/departments/${dep.id}`, {
+        name: editName,
+        description: editDesc || undefined,
+      });
+      setEditing(false);
+      await onAction(async () => {});
+    } catch (err) {
+      setEditError(err instanceof ApiError ? err.message : '保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div className="rounded-card border border-border bg-card p-4 shadow-card">
@@ -542,41 +670,60 @@ function DepartmentAdminCard({
           </span>
           {dep.description && <div className="mt-0.5 text-xs text-ink-400">{dep.description}</div>}
         </div>
-        <button
-          onClick={async () => {
-            const ok = await confirm({
-              title: '删除部门',
-              description: `删除「${dep.name}」后，其下空间将解除挂靠（空间与文档保留）。`,
-            });
-            if (ok) onDelete();
-          }}
-          className="rounded-lg p-1.5 text-ink-400 transition-colors hover:bg-red-500/10 hover:text-red-500"
-          title="删除部门（空间将解除挂靠）"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-          </svg>
-        </button>
+        <div className="flex shrink-0 items-center gap-1">
+          <button
+            onClick={() => {
+              setEditing(true);
+              setEditName(dep.name);
+              setEditDesc(dep.description ?? '');
+              setEditError('');
+            }}
+            className="rounded-lg p-1.5 text-ink-400 transition-colors hover:bg-subtle hover:text-brand-600"
+            title="编辑部门"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+            </svg>
+          </button>
+          <button
+            onClick={async () => {
+              const ok = await confirm({
+                title: '删除部门',
+                description: `删除「${dep.name}」后，其下空间将解除挂靠（空间与文档保留）。`,
+              });
+              if (ok) onDelete();
+            }}
+            className="rounded-lg p-1.5 text-ink-400 transition-colors hover:bg-red-500/10 hover:text-red-500"
+            title="删除部门（空间将解除挂靠）"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       <div className="mt-3 grid gap-4 border-t border-border pt-3 lg:grid-cols-2">
         <section>
-          <div className="text-xs font-medium text-ink-600">部门管理员</div>
-          <MemberList
-            people={dep.admins}
-            accent="brand"
-            emptyText="暂无管理员"
-            removeTitle="移除管理员"
-            onRemove={async (uid) => {
-              const a = dep.admins.find((x) => x.id === uid);
-              const ok = await confirm({
-                title: '移除部门管理员',
-                description: `「${a?.name ?? uid}」将失去本部门的管理与审核权限。`,
-                confirmText: '确认移除',
-              });
-              if (ok) await onAction(() => api.delete(`/admin/departments/${dep.id}/admins/${uid}`));
-            }}
-          />
+          <div className="text-xs font-medium text-ink-600">部门管理员（{dep.admins.length}）</div>
+          {/* 列表内部滚动：成员多时不拉长页面 */}
+          <div className="mt-1 max-h-72 overflow-y-auto pr-1">
+            <MemberList
+              people={dep.admins}
+              accent="brand"
+              emptyText="暂无管理员"
+              removeTitle="移除管理员"
+              onRemove={async (uid) => {
+                const a = dep.admins.find((x) => x.id === uid);
+                const ok = await confirm({
+                  title: '移除部门管理员',
+                  description: `「${a?.name ?? uid}」将失去本部门的管理与审核权限。`,
+                  confirmText: '确认移除',
+                });
+                if (ok) await onAction(() => api.delete(`/admin/departments/${dep.id}/admins/${uid}`));
+              }}
+            />
+          </div>
           <AddPerson
             label="添加管理员"
             accent="brand"
@@ -585,32 +732,34 @@ function DepartmentAdminCard({
           />
         </section>
         <section>
-          <div className="text-xs font-medium text-ink-600">部门成员</div>
-          <MemberList
-            people={dep.members}
-            emptyText="暂无成员"
-            removeTitle="移出部门"
-            onToggleDisabled={async (uid, disabled) => {
-              const m = dep.members.find((x) => x.id === uid);
-              const ok = await confirm({
-                title: disabled ? '禁用成员' : '启用成员',
-                description: disabled
-                  ? `禁用后「${m?.name ?? uid}」将无法登录系统。`
-                  : `启用后「${m?.name ?? uid}」可正常登录系统。`,
-                confirmText: disabled ? '确认禁用' : '确认启用',
-              });
-              if (ok) await onAction(() => api.patch(`/departments/${dep.id}/members/${uid}/disabled`, { disabled }));
-            }}
-            onRemove={async (uid) => {
-              const m = dep.members.find((x) => x.id === uid);
-              const ok = await confirm({
-                title: '移出部门成员',
-                description: `将「${m?.name ?? uid}」移出本部门，其本部门空间的访问权限将失效。`,
-                confirmText: '确认移出',
-              });
-              if (ok) await onAction(() => api.delete(`/departments/${dep.id}/members/${uid}`));
-            }}
-          />
+          <div className="text-xs font-medium text-ink-600">部门成员（{dep.members.length}）</div>
+          <div className="mt-1 max-h-72 overflow-y-auto pr-1">
+            <MemberList
+              people={dep.members}
+              emptyText="暂无成员"
+              removeTitle="移出部门"
+              onToggleDisabled={async (uid, disabled) => {
+                const m = dep.members.find((x) => x.id === uid);
+                const ok = await confirm({
+                  title: disabled ? '禁用成员' : '启用成员',
+                  description: disabled
+                    ? `禁用后「${m?.name ?? uid}」将无法登录系统。`
+                    : `启用后「${m?.name ?? uid}」可正常登录系统。`,
+                  confirmText: disabled ? '确认禁用' : '确认启用',
+                });
+                if (ok) await onAction(() => api.patch(`/departments/${dep.id}/members/${uid}/disabled`, { disabled }));
+              }}
+              onRemove={async (uid) => {
+                const m = dep.members.find((x) => x.id === uid);
+                const ok = await confirm({
+                  title: '移出部门成员',
+                  description: `将「${m?.name ?? uid}」移出本部门，其本部门空间的访问权限将失效。`,
+                  confirmText: '确认移出',
+                });
+                if (ok) await onAction(() => api.delete(`/departments/${dep.id}/members/${uid}`));
+              }}
+            />
+          </div>
           <AddPerson
             label="添加成员"
             candidates={memberCandidates}
@@ -619,6 +768,60 @@ function DepartmentAdminCard({
           <CreateMember onCreate={(data) => onAction(() => api.post(`/departments/${dep.id}/members/create`, data))} />
         </section>
       </div>
+      {editing && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setEditing(false)}
+        >
+          <form
+            onSubmit={saveEdit}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm rounded-card border border-border bg-card p-5 shadow-pop"
+          >
+            <h2 className="mb-4 text-base font-semibold text-ink-900">编辑部门</h2>
+            <label className="mb-3 block">
+              <span className="mb-1 block text-xs text-ink-400">部门名称</span>
+              <input
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                required
+                autoFocus
+                className={`${inputCls} w-full`}
+              />
+            </label>
+            <label className="mb-4 block">
+              <span className="mb-1 block text-xs text-ink-400">描述</span>
+              <input
+                value={editDesc}
+                onChange={(e) => setEditDesc(e.target.value)}
+                placeholder="部门职责说明"
+                className={`${inputCls} w-full`}
+              />
+            </label>
+            {editError && (
+              <p className="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
+                {editError}
+              </p>
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setEditing(false)}
+                className="rounded-lg border border-border px-4 py-2 text-sm text-ink-600 transition-colors hover:bg-subtle"
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                disabled={saving}
+                className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-brand-700 disabled:opacity-50"
+              >
+                {saving ? '保存中…' : '保存'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
       {confirmDialog}
     </div>
   );

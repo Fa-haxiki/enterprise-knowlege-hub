@@ -25,10 +25,12 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return this.client;
   }
 
+  /* 获取集合成员 */
   async getSet(key: string): Promise<string[]> {
     return this.client.smembers(key);
   }
 
+  /* 刷新集合成员 */
   async refreshSet(key: string, members: string[], ttlSeconds: number): Promise<void> {
     const pipeline = this.client.pipeline();
     pipeline.del(key);

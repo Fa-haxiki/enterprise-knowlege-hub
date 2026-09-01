@@ -72,10 +72,18 @@ export class DocumentsController {
     private readonly audit: AuditService,
   ) {}
 
-  /** 待审核列表（审核员/sysadmin）；须在 documents/:id 之前注册避免被 :id 吞掉 */
+  /** 待审核列表（审核员/sysadmin，分页）；须在 documents/:id 之前注册避免被 :id 吞掉 */
   @Get('documents/pending-review')
-  pendingReview(@CurrentUser() user: AuthUser) {
-    return this.documents.pendingReviewList(user);
+  pendingReview(
+    @CurrentUser() user: AuthUser,
+    @Query('page') page?: string,
+    @Query('page_size') pageSize?: string,
+  ) {
+    return this.documents.pendingReviewList(
+      user,
+      Math.max(1, parseInt(page ?? '1', 10) || 1),
+      Math.min(50, Math.max(1, parseInt(pageSize ?? '10', 10) || 10)),
+    );
   }
 
   /** 文档审核：通过入队解析 / 拒绝标记理由（service 内校验审核员权限） */
@@ -158,8 +166,19 @@ export class DocumentsController {
     @Param('workspaceId', ParseUUIDPipe) workspaceId: string,
     @Query('page') page = 1,
     @Query('page_size') pageSize = 20,
+    @Query('keyword') keyword?: string,
+    @Query('status') status?: string,
+    @Query('type') type?: string,
+    @Query('date_from') dateFrom?: string,
+    @Query('date_to') dateTo?: string,
   ) {
-    return this.documents.list(workspaceId, Number(page), Number(pageSize));
+    return this.documents.list(workspaceId, Number(page), Number(pageSize), {
+      keyword: keyword?.trim() || undefined,
+      status: status || undefined,
+      type: type || undefined,
+      dateFrom: dateFrom || undefined,
+      dateTo: dateTo || undefined,
+    });
   }
 
   @Get('documents/:id')

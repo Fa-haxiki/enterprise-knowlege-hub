@@ -1,10 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, In, IsNull, Repository } from 'typeorm';
 import { ErrorCode, SystemRole, WorkspaceRole } from '@ekh/shared';
 import { WorkspaceEntity } from '../../database/entities/workspace.entity';
 import { WorkspaceMemberEntity } from '../../database/entities/workspace-member.entity';
 import { DepartmentEntity } from '../../database/entities/department.entity';
+import { DocumentEntity } from '../../database/entities/document.entity';
 import { BizException } from '../../common/filters/http-exception.filter';
 import { AclService } from './acl.service';
 import type { AuthUser } from '../../common/decorators/current-user.decorator';
@@ -23,18 +24,19 @@ export class WorkspacesService {
   ) {}
 
   /** 部门只读列表：建空间时选择挂靠。普通用户只能选自己所属的部门，sysadmin 可见全部 */
+  /** 创建空间时可挂靠的部门：sysadmin 全部；部门管理员限其管理的部门；普通成员为空（无创建权限） */
   async listDepartments(user: AuthUser) {
     if (user.role === SystemRole.SYSADMIN) {
       const deps = await this.departments.find({ order: { createdAt: 'ASC' } });
       return { items: deps.map((d) => ({ id: d.id, name: d.name })) };
     }
-    const depIds = await this.acl.memberDepartmentIds(user.userId);
+    const depIds = await this.acl.adminDepartmentIds(user.userId);
     if (depIds.length === 0) return { items: [] };
     const deps = await this.departments.find({ where: depIds.map((id) => ({ id })), order: { createdAt: 'ASC' } });
     return { items: deps.map((d) => ({ id: d.id, name: d.name })) };
   }
 
-  /** 列出当前用户可见的空间（含角色） */
+  /** 列出当前用户可见的空间（含角色）：显式成员空间 ∪ 所属部门挂靠的空间（默认 viewer） */
   async listMine(userId: string) {
     const rows = await this.members
       .createQueryBuilder('m')
@@ -43,7 +45,7 @@ export class WorkspacesService {
       .where('m.user_id = :userId', { userId })
       .orderBy('ws.created_at', 'DESC')
       .getMany();
-    return rows.map((m) => ({
+    const items = rows.map((m) => ({
       id: m.workspace.id,
       name: m.workspace.name,
       description: m.workspace.description,
@@ -53,17 +55,44 @@ export class WorkspacesService {
         : null,
       created_at: m.workspace.createdAt,
     }));
+
+    // 部门成员可见的部门空间（未显式加入的部分，以 viewer 身份并入）
+    const depIds = await this.acl.memberDepartmentIds(userId);
+    if (depIds.length > 0) {
+      const seen = new Set(items.map((i) => i.id));
+      const depWs = await this.workspaces.find({
+        where: { departmentId: In(depIds) },
+        relations: { department: true },
+        order: { createdAt: 'DESC' },
+      });
+      for (const ws of depWs) {
+        if (seen.has(ws.id)) continue;
+        items.push({
+          id: ws.id,
+          name: ws.name,
+          description: ws.description,
+          role: WorkspaceRole.VIEWER,
+          department: ws.department ? { id: ws.department.id, name: ws.department.name } : null,
+          created_at: ws.createdAt,
+        });
+      }
+    }
+    return items;
   }
 
   async create(user: AuthUser, name: string, description?: string, departmentId?: string) {
-    // 空间必须挂靠部门（审核归属）；普通用户只能挂自己所属的部门，sysadmin 可挂任意部门
+    // 空间必须挂靠部门（审核归属）；创建权限收紧：仅 sysadmin / 部门管理员，
+    // 部门管理员只能在自己管理的部门下创建，普通成员只读不可创建
     if (!departmentId) {
       throw new BizException(ErrorCode.PARAM_MISSING, '必须选择挂靠部门', 400);
     }
     if (user.role !== SystemRole.SYSADMIN) {
-      const myDeps = await this.acl.memberDepartmentIds(user.userId);
-      if (!myDeps.includes(departmentId)) {
-        throw new BizException(ErrorCode.ACL_FORBIDDEN, '只能将空间挂靠到您所属的部门', 403);
+      const managedDeps = await this.acl.adminDepartmentIds(user.userId);
+      if (managedDeps.length === 0) {
+        throw new BizException(ErrorCode.ACL_FORBIDDEN, '仅部门管理员可创建知识空间', 403);
+      }
+      if (!managedDeps.includes(departmentId)) {
+        throw new BizException(ErrorCode.ACL_FORBIDDEN, '只能在您管理的部门下创建空间', 403);
       }
     }
     const userId = user.userId;
@@ -98,20 +127,40 @@ export class WorkspacesService {
     if (department_id === null) {
       throw new BizException(ErrorCode.PARAM_INVALID, '空间必须挂靠部门，不允许取消挂靠', 400);
     }
-    // 改挂靠部门同样限制在自己所属的部门内
-    if (department_id && user.role !== SystemRole.SYSADMIN) {
-      const myDeps = await this.acl.memberDepartmentIds(user.userId);
-      if (!myDeps.includes(department_id)) {
-        throw new BizException(ErrorCode.ACL_FORBIDDEN, '只能将空间挂靠到您所属的部门', 403);
-      }
-    }
     const data: { name?: string; description?: string; departmentId?: string | null } = { ...rest };
     if (department_id !== undefined) data.departmentId = department_id;
+    const before = department_id !== undefined
+      ? await this.workspaces.findOne({ where: { id }, select: ['departmentId'] })
+      : null;
+    // 改挂靠部门与创建一致：仅部门管理员，且限其管理的部门；值未变化（如仅改名称）不校验
+    if (department_id && before?.departmentId !== department_id && user.role !== SystemRole.SYSADMIN) {
+      const managedDeps = await this.acl.adminDepartmentIds(user.userId);
+      if (!managedDeps.includes(department_id)) {
+        throw new BizException(ErrorCode.ACL_FORBIDDEN, '只能将空间挂靠到您管理的部门', 403);
+      }
+    }
     await this.workspaces.update(id, data);
+    // 改挂部门会改变两个部门成员的可见空间集合，缓存需失效
+    if (department_id !== undefined && before?.departmentId !== department_id) {
+      if (before?.departmentId) await this.acl.invalidateDepartment(before.departmentId);
+      await this.acl.invalidateDepartment(department_id as string);
+    }
     return this.workspaces.findOne({ where: { id } });
   }
 
   async remove(id: string) {
+    // 非空空间禁止删除：文档的 chunk/ES/Neo4j/MinIO 清理由 worker 异步任务完成，
+    // 直接级联删库会留下孤儿数据，要求先逐篇删除文档（各走完整清理流程）
+    const docCount = await this.dataSource.getRepository(DocumentEntity).count({
+      where: { workspaceId: id, deletedAt: IsNull() },
+    });
+    if (docCount > 0) {
+      throw new BizException(
+        ErrorCode.PARAM_INVALID,
+        `空间内还有 ${docCount} 篇文档，请先删除全部文档后再删除空间`,
+        400,
+      );
+    }
     const memberRows = await this.members.find({ where: { workspaceId: id } });
     await this.workspaces.delete(id);
     await this.acl.invalidateMany(memberRows.map((m) => m.userId));

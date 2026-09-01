@@ -107,11 +107,9 @@ export class AguiController {
       dto.threadId,
       dto.state?.workspace_id,
     );
-    // 新会话用首个问题自动生成标题
-    if (created) {
-      const autoTitle = query.length > 20 ? `${query.slice(0, 20)}…` : query;
-      await this.chat.rename(user.userId, conv.id, autoTitle);
-    }
+    // 新会话标题与问答流并行生成（长问题走 LLM 总结，失败降级截取），不阻塞流式输出
+    let title = conv.title;
+    const titlePromise = created ? this.chat.generateTitle(query) : null;
     await this.chat.saveUserMessage(conv.id, query);
 
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -163,6 +161,12 @@ export class AguiController {
       );
       if (textStarted) send({ type: 'TEXT_MESSAGE_END', messageId: streamMsgId });
 
+      // 标题生成与问答并行，此处只需等剩余时间（通常已完成）
+      if (titlePromise) {
+        title = await titlePromise;
+        await this.chat.rename(user.userId, conv.id, title);
+      }
+
       const latencyMs = Date.now() - t0;
       const assistantMsg = await this.chat.saveAssistantMessage(
         conv.id,
@@ -198,6 +202,8 @@ export class AguiController {
           message_id: assistantMsg.id,
           conversation_id: conv.id,
           complexity: result.complexity ?? null,
+          // 带给前端直接更新侧边栏，避免每次问答后整表重拉 conversations
+          title,
         },
       });
 
@@ -213,6 +219,12 @@ export class AguiController {
         { role: 'assistant', content: result.answer },
       ]);
     } catch (e) {
+      // 问答失败也要把已生成的标题落库，避免新会话停留在默认标题
+      if (titlePromise) {
+        void titlePromise
+          .then((t) => this.chat.rename(user.userId, conv.id, t))
+          .catch(() => undefined);
+      }
       if (textStarted) send({ type: 'TEXT_MESSAGE_END', messageId: streamMsgId });
       send({ type: 'RUN_ERROR', message: (e as Error).message || '问答失败', code: ErrorCode.INTERNAL });
     } finally {

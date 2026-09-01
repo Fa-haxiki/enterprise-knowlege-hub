@@ -37,6 +37,9 @@ export default () => ({
     accessKey: process.env.MINIO_USER ?? 'ekh',
     secretKey: process.env.MINIO_PASSWORD ?? '',
     bucket: process.env.MINIO_BUCKET ?? 'ekh-docs',
+    // 预签名 URL 的对外地址（局域网 IP / 域名）；不配置则与内部地址一致（仅本机可用）
+    publicEndPoint: process.env.MINIO_PUBLIC_ENDPOINT ?? '',
+    publicPort: parseInt(process.env.MINIO_PUBLIC_PORT ?? process.env.MINIO_PORT ?? '9000', 10),
   },
   llm: {
     baseURL: process.env.LLM_BASE_URL ?? 'https://api.deepseek.com/v1',
@@ -63,6 +66,7 @@ export default () => ({
     model: process.env.MINERU_MODEL ?? 'vlm',
   },
   mem0: {
+    enabled: process.env.MEM0_ENABLED === 'true',
     url: process.env.MEM0_URL ?? 'http://localhost:8888',
     apiKey: process.env.MEM0_API_KEY ?? '',
   },
