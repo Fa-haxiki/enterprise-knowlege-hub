@@ -1,6 +1,8 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, MouseEvent, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '@/lib/api';
+import { useAuthStore } from '@/store/auth';
+import { useConfirm } from '@/components/ConfirmDialog';
 
 interface Workspace {
   id: string;
@@ -24,6 +26,8 @@ const ROLE_CLS = {
 } as const;
 
 export default function WorkspacesPage() {
+  const user = useAuthStore((s) => s.user);
+  const { confirm, confirmDialog } = useConfirm();
   const [list, setList] = useState<Workspace[]>([]);
   const [departments, setDepartments] = useState<DepartmentOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -31,6 +35,13 @@ export default function WorkspacesPage() {
   const [description, setDescription] = useState('');
   const [departmentId, setDepartmentId] = useState('');
   const [error, setError] = useState('');
+  /** 编辑中的空间；null 表示未打开编辑弹窗 */
+  const [editing, setEditing] = useState<Workspace | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editDesc, setEditDesc] = useState('');
+  const [editDeptId, setEditDeptId] = useState('');
+  const [editError, setEditError] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const load = () =>
     api
@@ -68,6 +79,55 @@ export default function WorkspacesPage() {
     }
   };
 
+  const canManage = (ws: Workspace) => ws.role === 'owner' || user?.role === 'sysadmin';
+
+  const openEdit = (e: MouseEvent, ws: Workspace) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setEditing(ws);
+    setEditName(ws.name);
+    setEditDesc(ws.description ?? '');
+    setEditDeptId(ws.department?.id ?? '');
+    setEditError('');
+  };
+
+  const saveEdit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!editing) return;
+    setSaving(true);
+    setEditError('');
+    try {
+      await api.patch(`/workspaces/${editing.id}`, {
+        name: editName,
+        description: editDesc || undefined,
+        department_id: editDeptId || undefined,
+      });
+      setEditing(null);
+      await load();
+    } catch (err) {
+      setEditError(err instanceof ApiError ? err.message : '保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (e: MouseEvent, ws: Workspace) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const ok = await confirm({
+      title: '删除知识空间',
+      description: `空间「${ws.name}」将被删除，成员授权一并失效。空间内的文档需先逐篇删除，否则无法删除空间。此操作不可恢复。`,
+      confirmText: '确认删除',
+    });
+    if (!ok) return;
+    try {
+      await api.delete(`/workspaces/${ws.id}`);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : '删除失败');
+    }
+  };
+
   return (
     <div className="h-full overflow-y-auto p-6">
       <div className="mx-auto max-w-4xl">
@@ -76,7 +136,7 @@ export default function WorkspacesPage() {
 
         {departments.length === 0 && !loading ? (
           <div className="mb-6 rounded-card border border-dashed border-border bg-card p-4 text-sm text-ink-400">
-            您还未加入任何部门，暂时无法创建空间。请联系您的部门管理员将您加入部门。
+            仅部门管理员可创建空间。您可查看所属部门下的空间，如需新建请联系部门管理员。
           </div>
         ) : (
           <form
@@ -151,14 +211,40 @@ export default function WorkspacesPage() {
                 {ws.description && (
                   <div className="mt-2 line-clamp-2 text-sm leading-5 text-ink-400">{ws.description}</div>
                 )}
-                {ws.department && (
-                  <div className="mt-2 flex items-center gap-1 text-xs text-ink-400">
-                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6" />
-                    </svg>
-                    {ws.department.name}
-                  </div>
-                )}
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  {ws.department ? (
+                    <div className="flex items-center gap-1 text-xs text-ink-400">
+                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6" />
+                      </svg>
+                      {ws.department.name}
+                    </div>
+                  ) : (
+                    <span />
+                  )}
+                  {canManage(ws) && (
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={(e) => void openEdit(e, ws)}
+                        title="编辑空间"
+                        className="rounded-lg p-1.5 text-ink-400 opacity-0 transition-all hover:bg-subtle hover:text-brand-600 group-hover:opacity-100"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                        </svg>
+                      </button>
+                      <button
+                        onClick={(e) => void remove(e, ws)}
+                        title="删除空间"
+                        className="rounded-lg p-1.5 text-ink-400 opacity-0 transition-all hover:bg-red-500/10 hover:text-red-600 group-hover:opacity-100"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                        </svg>
+                      </button>
+                    </div>
+                  )}
+                </div>
               </Link>
             ))}
             {list.length === 0 && (
@@ -169,6 +255,78 @@ export default function WorkspacesPage() {
           </div>
         )}
       </div>
+
+      {editing && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setEditing(null)}
+        >
+          <form
+            onSubmit={saveEdit}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md rounded-card border border-border bg-card p-5 shadow-pop"
+          >
+            <h2 className="mb-4 text-base font-semibold text-ink-900">编辑空间</h2>
+            <label className="mb-3 block">
+              <span className="mb-1 block text-xs text-ink-400">空间名称</span>
+              <input
+                className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm outline-none transition-colors focus:border-brand-500"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                required
+              />
+            </label>
+            <label className="mb-3 block">
+              <span className="mb-1 block text-xs text-ink-400">描述</span>
+              <input
+                className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm outline-none transition-colors focus:border-brand-500"
+                value={editDesc}
+                onChange={(e) => setEditDesc(e.target.value)}
+              />
+            </label>
+            <label className="mb-4 block">
+              <span className="mb-1 block text-xs text-ink-400">挂靠部门</span>
+              <select
+                className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm text-ink-600 outline-none transition-colors focus:border-brand-500"
+                value={editDeptId}
+                onChange={(e) => setEditDeptId(e.target.value)}
+                required
+              >
+                {/* 当前挂靠部门可能不在可管理部门列表中（如 sysadmin 编辑他人空间），合并进选项仅作展示 */}
+                {(editing.department && !departments.some((d) => d.id === editing.department!.id)
+                  ? [...departments, editing.department]
+                  : departments
+                ).map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {editError && (
+              <p className="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
+                {editError}
+              </p>
+            )}
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setEditing(null)}
+                className="rounded-lg border border-border px-4 py-2 text-sm text-ink-600 transition-colors hover:bg-subtle"
+              >
+                取消
+              </button>
+              <button
+                disabled={saving}
+                className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-brand-700 disabled:opacity-50"
+              >
+                {saving ? '保存中…' : '保存'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+      {confirmDialog}
     </div>
   );
 }

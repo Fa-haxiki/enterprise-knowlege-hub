@@ -274,6 +274,8 @@ flowchart LR
 | Department | name | 实体抽取 |
 | Chunk | chunk_id(唯一键), document_id | 入库时写入 |
 
+以上 5 类实体为 **v1 封闭白名单**（对齐入库抽取与问答路由），不是跨行业标准清单。扩展、改名或把 `Supplier` 收成 `Organization` 见 [08-roadmap.md](./08-roadmap.md)「图谱实体类型演进」。
+
 - 实体对齐：以「类型 + 标准化名称」MERGE；名称标准化（去空格/全半角/大小写）后冲突交人工维护台（P2）
 - 关系属性：`{source_chunk_id, confidence, extracted_at}`，支持溯源
 

@@ -3,7 +3,10 @@ import type { AgentStep, Citation, Triple, UsageInfo } from '@/lib/agui';
 export type { AgentStep, Citation, Triple, UsageInfo };
 
 export interface Message {
+  /** 渲染 key：流式期间为本地 tmp id，完成后保持不变，避免 React 重挂载闪烁 */
   id: string;
+  /** 服务端消息 id（流式完成后由 RUN_FINISHED 带出），反馈等 API 使用 */
+  serverId?: string;
   role: 'user' | 'assistant';
   content: string;
   citations?: Citation[];

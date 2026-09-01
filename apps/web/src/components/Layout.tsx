@@ -1,4 +1,6 @@
-import { NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { api } from '@/lib/api';
 import { useAuthStore } from '@/store/auth';
 import { useThemeStore } from '@/store/theme';
 
@@ -68,6 +70,31 @@ export default function Layout() {
   const { user, clear } = useAuthStore();
   const { theme, toggle } = useThemeStore();
   const navigate = useNavigate();
+  const location = useLocation();
+  const [pendingReviewCount, setPendingReviewCount] = useState(0);
+
+  const canReview = !!user && (user.role === 'sysadmin' || !!user.is_dept_admin);
+
+  // 待审核角标：挂载/路由变化时刷新；浏览器切回本标签页时再刷新一次（不轮询）
+  useEffect(() => {
+    if (!canReview) return;
+    let cancelled = false;
+    const fetchCount = () =>
+      api
+        .get<{ total: number }>('/documents/pending-review?page=1&page_size=1')
+        .then((d) => !cancelled && setPendingReviewCount(d.total))
+        .catch(() => undefined);
+    void fetchCount();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void fetchCount();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canReview, location.pathname]);
 
   const logout = () => {
     clear();
@@ -102,6 +129,11 @@ export default function Layout() {
             >
               {item.icon}
               {item.label}
+              {item.to === '/review' && pendingReviewCount > 0 && (
+                <span className="ml-auto flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-semibold text-white">
+                  {pendingReviewCount > 99 ? '99+' : pendingReviewCount}
+                </span>
+              )}
             </NavLink>
           ))}
         </nav>

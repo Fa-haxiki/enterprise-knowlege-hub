@@ -14,44 +14,17 @@ interface Props {
   onRemove(id: string): Promise<void>;
 }
 
-interface Group {
-  label: string;
-  items: Conversation[];
-}
-
-function groupByDate(items: Conversation[]): Group[] {
-  const now = new Date();
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const yesterdayStart = todayStart - 86400_000;
-  const weekStart = todayStart - 6 * 86400_000;
-  const groups: Group[] = [
-    { label: '今天', items: [] },
-    { label: '昨天', items: [] },
-    { label: '7 天内', items: [] },
-    { label: '更早', items: [] },
-  ];
-  for (const c of items) {
-    const t = new Date(c.updated_at).getTime();
-    if (t >= todayStart) groups[0].items.push(c);
-    else if (t >= yesterdayStart) groups[1].items.push(c);
-    else if (t >= weekStart) groups[2].items.push(c);
-    else groups[3].items.push(c);
-  }
-  return groups.filter((g) => g.items.length > 0);
-}
-
 export default function ConversationSidebar({ conversations, activeId, loading, hasMore, loadingMore, onLoadMore, onRename, onRemove }: Props) {
   const navigate = useNavigate();
   const [keyword, setKeyword] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
 
+  // 平铺列表：后端已按 updated_at 倒序返回（最新 → 最旧），不再按日期分组
   const filtered = useMemo(() => {
     const kw = keyword.trim().toLowerCase();
     return kw ? conversations.filter((c) => c.title.toLowerCase().includes(kw)) : conversations;
   }, [conversations, keyword]);
-
-  const groups = useMemo(() => groupByDate(filtered), [filtered]);
 
   const submitRename = async () => {
     if (!editingId) return;
@@ -105,75 +78,70 @@ export default function ConversationSidebar({ conversations, activeId, loading, 
               <div key={i} className="skeleton h-8 rounded-lg" />
             ))}
           </div>
-        ) : groups.length === 0 ? (
+        ) : filtered.length === 0 ? (
           <p className="py-10 text-center text-xs text-ink-400">
             {keyword ? '没有匹配的对话' : '暂无对话'}
           </p>
         ) : (
-          groups.map((g) => (
-            <div key={g.label} className="mb-2">
-              <div className="px-2 pb-1 pt-2 text-[11px] font-medium text-ink-400">{g.label}</div>
-              {g.items.map((c) => (
-                <div
-                  key={c.id}
-                  className={`group relative flex items-center rounded-lg transition-colors ${
-                    c.id === activeId ? 'bg-brand-600/10 text-brand-700' : 'text-ink-600 hover:bg-subtle'
-                  }`}
-                >
-                  {editingId === c.id ? (
-                    <input
-                      autoFocus
-                      className="m-1 w-full rounded-md border border-brand-500 bg-card px-2 py-1.5 text-sm outline-none"
-                      value={editingTitle}
-                      onChange={(e) => setEditingTitle(e.target.value)}
-                      onBlur={() => void submitRename()}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') void submitRename();
-                        if (e.key === 'Escape') setEditingId(null);
+          filtered.map((c) => (
+            <div
+              key={c.id}
+              className={`group relative flex items-center rounded-lg transition-colors ${
+                c.id === activeId ? 'bg-brand-600/10 text-brand-700' : 'text-ink-600 hover:bg-subtle'
+              }`}
+            >
+              {editingId === c.id ? (
+                <input
+                  autoFocus
+                  className="m-1 w-full rounded-md border border-brand-500 bg-card px-2 py-1.5 text-sm outline-none"
+                  value={editingTitle}
+                  onChange={(e) => setEditingTitle(e.target.value)}
+                  onBlur={() => void submitRename()}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void submitRename();
+                    if (e.key === 'Escape') setEditingId(null);
+                  }}
+                />
+              ) : (
+                <>
+                  <button
+                    onClick={() => navigate(`/chat/${c.id}`)}
+                    className="min-w-0 flex-1 truncate px-3 py-2 text-left text-sm"
+                    title={c.title}
+                  >
+                    {c.title}
+                  </button>
+                  <div className="absolute right-1 hidden items-center gap-0.5 group-hover:flex">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditingId(c.id);
+                        setEditingTitle(c.title);
                       }}
-                    />
-                  ) : (
-                    <>
-                      <button
-                        onClick={() => navigate(`/chat/${c.id}`)}
-                        className="min-w-0 flex-1 truncate px-3 py-2 text-left text-sm"
-                        title={c.title}
-                      >
-                        {c.title}
-                      </button>
-                      <div className="absolute right-1 hidden items-center gap-0.5 group-hover:flex">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setEditingId(c.id);
-                            setEditingTitle(c.title);
-                          }}
-                          className="rounded-md bg-card/80 p-1 text-ink-400 shadow-sm hover:text-ink-900"
-                          title="重命名"
-                        >
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                          </svg>
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void onRemove(c.id);
-                          }}
-                          className="rounded-md bg-card/80 p-1 text-ink-400 shadow-sm hover:text-red-500"
-                          title="删除"
-                        >
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M3 6h18" />
-                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-                            <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                          </svg>
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </div>
-              ))}
+                      className="rounded-md bg-card/80 p-1 text-ink-400 shadow-sm hover:text-ink-900"
+                      title="重命名"
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                      </svg>
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void onRemove(c.id);
+                      }}
+                      className="rounded-md bg-card/80 p-1 text-ink-400 shadow-sm hover:text-red-500"
+                      title="删除"
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M3 6h18" />
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                      </svg>
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           ))
         )}

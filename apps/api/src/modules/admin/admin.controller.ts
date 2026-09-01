@@ -139,6 +139,12 @@ export class AdminController {
     return this.admin.listDepartments();
   }
 
+  /** 部门详情（管理员+成员列表）：前端点击部门时按需加载 */
+  @Get('departments/:id')
+  getDepartmentDetail(@Param('id', ParseUUIDPipe) id: string) {
+    return this.admin.getDepartmentDetail(id);
+  }
+
   @Post('departments')
   createDepartment(@CurrentUser() user: AuthUser, @Body() dto: DepartmentDto) {
     return this.admin.createDepartment(user.userId, dto.name, dto.description);

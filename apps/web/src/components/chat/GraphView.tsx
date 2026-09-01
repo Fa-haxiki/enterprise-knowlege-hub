@@ -5,6 +5,7 @@ import ForceGraph2D, {
   type NodeObject,
 } from 'react-force-graph-2d';
 import { forceCollide } from 'd3-force';
+import { useThemeStore } from '@/store/theme';
 import type { Triple } from './types';
 
 /** 关系类型英文 → 中文（LLM 抽取的自由动词，未命中时降级为原文小写分词） */
@@ -47,6 +48,32 @@ interface GLink extends LinkObject {
 const NODE_FILL = '#6366f1';
 const NODE_FILL_ACTIVE = '#4f46e5';
 const NODE_FILL_DIM = '#c7d2fe';
+
+/** 暗色模式调色板：canvas 绘制不吃 Tailwind 暗色类，需按主题显式切换 */
+const PALETTE = {
+  light: {
+    nodeActive: NODE_FILL_ACTIVE,
+    nodeDim: NODE_FILL_DIM,
+    nodeStroke: '#312e81',
+    nodeText: '#1e1b4b',
+    nodeTextDim: '#a5b4fc',
+    link: '#e0e7ff',
+    linkActive: '#818cf8',
+    linkLabel: '#c7d2fe',
+    linkLabelActive: '#4f46e5',
+  },
+  dark: {
+    nodeActive: '#818cf8',
+    nodeDim: '#3730a3',
+    nodeStroke: '#c7d2fe',
+    nodeText: '#e0e7ff',
+    nodeTextDim: '#6366f1',
+    link: '#4338ca',
+    linkActive: '#818cf8',
+    linkLabel: '#818cf8',
+    linkLabelActive: '#c7d2fe',
+  },
+} as const;
 
 function truncate(name: string, max = 8): string {
   return name.length > max ? `${name.slice(0, max)}…` : name;
@@ -133,6 +160,9 @@ el`;
     [selected],
   );
 
+  const isDark = useThemeStore((s) => s.theme === 'dark');
+  const pal = isDark ? PALETTE.dark : PALETTE.light;
+
   const drawNode = useCallback(
     (node: GNode, ctx: CanvasRenderingContext2D, globalScale: number) => {
       const dimmed = selected && node.id !== selected && !related.some((t) => t[0] === node.id || t[2] === node.id);
@@ -142,21 +172,21 @@ el`;
 
       ctx.beginPath();
       ctx.arc(node.x!, node.y!, r, 0, 2 * Math.PI);
-      ctx.fillStyle = dimmed ? NODE_FILL_DIM : node.id === selected ? NODE_FILL_ACTIVE : NODE_FILL;
+      ctx.fillStyle = dimmed ? pal.nodeDim : node.id === selected ? pal.nodeActive : NODE_FILL;
       ctx.fill();
       if (node.id === selected) {
         ctx.lineWidth = 2 / globalScale;
-        ctx.strokeStyle = '#312e81';
+        ctx.strokeStyle = pal.nodeStroke;
         ctx.stroke();
       }
 
       ctx.font = `${fontSize}px sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
-      ctx.fillStyle = dimmed ? '#a5b4fc' : '#1e1b4b';
+      ctx.fillStyle = dimmed ? pal.nodeTextDim : pal.nodeText;
       ctx.fillText(label, node.x!, node.y! + r + 2 / globalScale);
     },
-    [selected, related],
+    [selected, related, pal],
   );
 
   const drawLink = useCallback(
@@ -171,10 +201,14 @@ el`;
       ctx.moveTo(s.x, s.y);
       let labelX: number;
       let labelY: number;
+      let tipDirX: number;
+      let tipDirY: number;
       if (k === 0) {
         ctx.lineTo(t.x, t.y);
         labelX = (s.x + t.x) / 2;
         labelY = (s.y + t.y) / 2;
+        tipDirX = t.x - s.x;
+        tipDirY = t.y - s.y;
       } else {
         // 二次贝塞尔：控制点沿中点法线偏移 k × 边长
         const mx = (s.x + t.x) / 2;
@@ -188,19 +222,41 @@ el`;
         // 曲线 t=0.5 处坐标：0.25s + 0.5c + 0.25t
         labelX = 0.25 * s.x + 0.5 * cx + 0.25 * t.x;
         labelY = 0.25 * s.y + 0.5 * cy + 0.25 * t.y;
+        // 贝塞尔终点切线方向 = 终点 - 控制点
+        tipDirX = t.x - cx;
+        tipDirY = t.y - cy;
       }
       ctx.lineWidth = (active && selected ? 1.6 : 1) / globalScale;
-      ctx.strokeStyle = active ? '#818cf8' : '#e0e7ff';
+      ctx.strokeStyle = active ? pal.linkActive : pal.link;
       ctx.stroke();
+
+      // 方向箭头：画在目标节点边缘，沿边的终点切线方向
+      const targetR = Math.min(5 + (t.degree ?? 0) * 1.5, 12);
+      const dLen = Math.hypot(tipDirX, tipDirY) || 1;
+      const ux = tipDirX / dLen;
+      const uy = tipDirY / dLen;
+      const tipX = t.x - ux * (targetR + 1.5 / globalScale);
+      const tipY = t.y - uy * (targetR + 1.5 / globalScale);
+      const arrowLen = 7 / globalScale;
+      const arrowW = 5 / globalScale;
+      const baseX = tipX - ux * arrowLen;
+      const baseY = tipY - uy * arrowLen;
+      ctx.beginPath();
+      ctx.moveTo(tipX, tipY);
+      ctx.lineTo(baseX - uy * (arrowW / 2), baseY + ux * (arrowW / 2));
+      ctx.lineTo(baseX + uy * (arrowW / 2), baseY - ux * (arrowW / 2));
+      ctx.closePath();
+      ctx.fillStyle = active ? pal.linkActive : pal.linkLabel;
+      ctx.fill();
 
       const fontSize = Math.max(9 / globalScale, 2);
       ctx.font = `${fontSize}px sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = active ? '#4f46e5' : '#c7d2fe';
+      ctx.fillStyle = active ? pal.linkLabelActive : pal.linkLabel;
       ctx.fillText(link.label, labelX, labelY);
     },
-    [isRelated, selected],
+    [isRelated, selected, pal],
   );
 
   // 右侧列表：未选中显示全部链路，选中后过滤为关联链路

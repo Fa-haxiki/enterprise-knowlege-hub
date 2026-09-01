@@ -1,5 +1,12 @@
 # 前端坑点（React / Vite / Tailwind）
 
+## crypto.subtle 在 http 局域网 IP 下不可用（安全上下文限制）
+
+- **现象**：系统改为局域网共享（`http://192.168.x.x:5173`）后，上传在 sha256 预检处抛 `Cannot read properties of undefined (reading 'digest')`
+- **根因**：`crypto.subtle` 仅在安全上下文（localhost / HTTPS）可用，`http://<IP>` 不算安全上下文，`crypto.subtle` 为 undefined
+- **修复**：检测 `crypto.subtle` 存在性，不可用时降级为 js-sha256（`sha256(arrayBuffer)`）；凡用到 Web Crypto / 剪贴板 / getUserMedia 等 API 都要考虑局域网 http 场景
+- **相关**：`apps/web/src/pages/DocumentsPage.tsx` doUpload
+
 ## socket.io 的 namespace 不在 URL 路径里
 
 - **现象**：vite proxy 配 `'/tts': { ws: true }` 后 WS 仍连不上，`/tts/socket.io/?EIO=4` 返回 404

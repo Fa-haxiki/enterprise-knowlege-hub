@@ -62,6 +62,7 @@ export class MemoryService {
    * 合并去重；单级故障不影响另一级，整体故障返回空（降级）。
    */
   async searchLongTerm(userId: string, conversationId: string, query: string): Promise<string[]> {
+    if (!this.config.get<boolean>('mem0.enabled')) return [];
     const [userResult, sessionResult] = await Promise.allSettled([
       this.searchMem0({ query, user_id: userId, limit: 5 }),
       this.searchMem0({ query, user_id: userId, session_id: conversationId, limit: 3 }),
@@ -99,6 +100,7 @@ export class MemoryService {
 
   /** 异步写入长期记忆（不阻塞主流程） */
   addLongTerm(userId: string, conversationId: string, messages: WindowMessage[]): void {
+    if (!this.config.get<boolean>('mem0.enabled')) return;
     const url = this.config.get<string>('mem0.url');
     fetch(`${url}/v1/memories/`, {
       method: 'POST',

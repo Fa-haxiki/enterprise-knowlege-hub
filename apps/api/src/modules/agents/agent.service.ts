@@ -14,7 +14,7 @@ import { AgentStateAnnotation, type AgentCallbacks, type AgentState } from './ag
 
 const NODE_TIMEOUTS: Record<string, number> = {
   query_rewrite: 5_000,
-  complexity_router: 5_000,
+  complexity_router: 10_000,
   hybrid_retrieve: 8_000,
   graph_reason: 8_000,
   memory_load: 3_000,
@@ -77,16 +77,29 @@ export class AgentService {
     return { state: result, traceId: trace?.id ?? null };
   }
 
+  /**
+   * 问答状态机：START → … → llm_generate → END。
+   * 仅 hybrid_retrieve 之后有分支：complex 且开启图谱才走 graph_reason。
+   */
   private buildGraph() {
     const g = new StateGraph(AgentStateAnnotation)
+      // 加载用户可见空间白名单（检索 ACL 前置过滤）
       .addNode('acl_guard', this.wrap('acl_guard', this.aclGuard.bind(this)))
+      // 读取 Redis 短期窗口 + 滚动摘要（供改写与 Prompt）
       .addNode('load_window', this.wrap('load_window', this.loadWindow.bind(this)))
+      // 结合对话历史做指代消解，改写成独立问题
       .addNode('query_rewrite', this.wrap('query_rewrite', this.queryRewrite.bind(this)))
+      // LLM 二分类 simple/complex，并抽出实体供图谱使用
       .addNode('complexity_router', this.wrap('complexity_router', this.complexityRouter.bind(this)))
+      // ES + PGVector 双路召回 → RRF 融合 → Rerank Top-N
       .addNode('hybrid_retrieve', this.wrap('hybrid_retrieve', this.hybridRetrieve.bind(this)))
+      // Neo4j 多跳推理 + 图增强补召回（仅 complex 路径）
       .addNode('graph_reason', this.wrap('graph_reason', this.graphReason.bind(this)))
+      // 拉取 Mem0 长期记忆（user / session）
       .addNode('memory_load', this.wrap('memory_load', this.memoryLoad.bind(this)))
+      // 把记忆、分片、图谱三元组拼成最终 Prompt
       .addNode('prompt_build', this.wrap('prompt_build', this.promptBuild.bind(this)))
+      // LLM 流式生成答案，并把 [n] 对齐成 citation
       .addNode('llm_generate', this.wrap('llm_generate', this.llmGenerate.bind(this)))
       .addEdge(START, 'acl_guard')
       .addEdge('acl_guard', 'load_window')

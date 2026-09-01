@@ -90,6 +90,7 @@ export class DepartmentsService {
       throw new BizException(ErrorCode.PARAM_INVALID, '用户不存在或未激活', 400);
     }
     await this.members.save(this.members.create({ departmentId, userId, addedBy: operator.userId }));
+    await this.acl.invalidate(userId);
     this.audit.record({
       userId: operator.userId,
       action: 'dept_member_add',
@@ -122,6 +123,7 @@ export class DepartmentsService {
       }),
     );
     await this.members.save(this.members.create({ departmentId, userId: user.id, addedBy: operator.userId }));
+    await this.acl.invalidate(user.id);
     this.audit.record({
       userId: operator.userId,
       action: 'dept_member_create',
@@ -147,6 +149,7 @@ export class DepartmentsService {
     }
     membership.user.disabledAt = disabled ? new Date() : null;
     await this.users.save(membership.user);
+    await this.acl.invalidate(userId);
     this.audit.record({
       userId: operator.userId,
       action: disabled ? 'dept_member_disable' : 'dept_member_enable',
@@ -160,6 +163,7 @@ export class DepartmentsService {
   async removeMember(operator: AuthUser, departmentId: string, userId: string) {
     await this.assertManager(operator, departmentId);
     await this.members.delete({ departmentId, userId });
+    await this.acl.invalidate(userId);
     this.audit.record({
       userId: operator.userId,
       action: 'dept_member_remove',

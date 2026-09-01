@@ -139,6 +139,8 @@ LLM 从改写后的问题中抽取实体并对齐图内节点：
 输出 JSON: [{"name":"A项目","type":"Project"},{"name":"华云科技","type":"Supplier"}]
 ```
 
+入库抽取使用同一白名单（`entity-extractor.ts` 的 `ENTITY_TYPES`，白名单外类型丢弃）。这 5 类是 v1 封闭集合；扩展或改名须三处对齐并重跑图谱，见 [08-roadmap.md](./08-roadmap.md)「图谱实体类型演进」。
+
 抽取结果先与 Neo4j 做名称模糊匹配（`apoc.text.levenshteinSimilarity` ≥ 0.8）对齐到已有节点，避免「A项目 / A 项目」不匹配。
 
 ### 3.2 多跳查询
@@ -240,10 +242,11 @@ A项目 --USES_SUPPLIER--> 华云科技 --SERVES--> B项目 --OWNED_BY--> 李四
 
 ### 8.3 实体抽取与建图
 
-- 按文档级批量抽取：LLM 输入 chunk 序列，输出 `entities[]` 与 `relations[]`（JSON Schema 约束）
+- 按文档级批量抽取：LLM 输入 chunk 序列，输出 `entities[]` 与 `relations[]`（JSON Schema 约束）；实体 `type` 必须落在封闭白名单内
 - 写入 Neo4j：`MERGE` 实体（类型+标准化名称为唯一键），`CREATE` 关系并附 `{source_chunk_id, confidence}`
 - 同步建立 `(:Chunk {chunk_id})-[:MENTIONS]->(:Entity)` 用于图增强检索（§3.3）
 - confidence < 0.7 的关系进入待审核队列（P2 维护台处理）
+- 类型集合演进（如 `Supplier` → `Organization`、按需加 `Contract`）见 [08-roadmap.md](./08-roadmap.md)「图谱实体类型演进」，不在 v1 实现
 
 ## 9. LangFuse 埋点规范
 

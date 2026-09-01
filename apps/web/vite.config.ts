@@ -8,6 +8,8 @@ export default defineConfig({
     alias: { '@': path.resolve(__dirname, 'src') },
   },
   server: {
+    // 监听所有网卡：局域网同事可通过 http://<本机IP>:5173 访问
+    host: true,
     port: 5173,
     proxy: {
       '/api': {

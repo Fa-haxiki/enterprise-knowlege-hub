@@ -51,6 +51,8 @@ export default function ChatPage() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const msgPageRef = useRef(1);
   const skipAutoScrollRef = useRef(false);
+  /** 新对话首轮结束后 navigate 到会话页：本地已有完整消息，跳过本次 messages 拉取 */
+  const skipMsgLoadRef = useRef<string | null>(null);
   const ttsRef = useRef<TtsPlayer | null>(null);
   const autoSpeakRef = useRef(autoSpeak);
   autoSpeakRef.current = autoSpeak;
@@ -134,6 +136,12 @@ export default function ChatPage() {
   useEffect(() => {
     if (!conversationId) {
       setMessages([]);
+      setHasMoreMsgs(false);
+      return;
+    }
+    // 新对话首轮流式完成后跳转而来：消息已在本地，直接跳过重拉
+    if (skipMsgLoadRef.current === conversationId) {
+      skipMsgLoadRef.current = null;
       setHasMoreMsgs(false);
       return;
     }
@@ -251,17 +259,30 @@ export default function ChatPage() {
               degradedNodes: u.degraded ?? [],
             })),
           onFinished: (result) => {
+            // 仅记录 serverId，不改动 id——id 作为 React key，变更会导致整条消息重挂载闪烁
             update((m) => ({
               ...m,
-              id: result.message_id,
+              serverId: result.message_id,
               streaming: false,
               complexity: result.complexity,
             }));
-            if (!conversationId) navigate(`/chat/${result.conversation_id}`, { replace: true });
-            void loadConversations();
+            if (!conversationId) {
+              skipMsgLoadRef.current = result.conversation_id;
+              navigate(`/chat/${result.conversation_id}`, { replace: true });
+            }
+            // 本地更新侧边栏：当前会话置顶（新会话插入），无需整表重拉
+            setConversations((prev) => {
+              const existing = prev.find((c) => c.id === result.conversation_id);
+              const item: Conversation = {
+                id: result.conversation_id,
+                title: existing?.title ?? result.title ?? '新对话',
+                updated_at: new Date().toISOString(),
+              };
+              return [item, ...prev.filter((c) => c.id !== result.conversation_id)];
+            });
             // 自动语音播报新回答
             if (autoSpeakRef.current && fullContent) {
-              setPlayingMsgId(result.message_id);
+              setPlayingMsgId(assistantMsg.id);
               getTts().speak(fullContent);
             }
           },
@@ -300,10 +321,11 @@ export default function ChatPage() {
     if (id === conversationId) navigate('/chat');
   };
 
-  const feedback = async (messageId: string, value: 1 | -1) => {
-    if (messageId.startsWith('tmp-')) return;
-    await api.post(`/messages/${messageId}/feedback`, { feedback: value }).catch(() => undefined);
-    setMessages((prev) => prev.map((m) => (m.id === messageId ? { ...m, feedback: value } : m)));
+  const feedback = async (message: Message, value: 1 | -1) => {
+    const serverId = message.serverId ?? message.id;
+    if (serverId.startsWith('tmp-')) return;
+    await api.post(`/messages/${serverId}/feedback`, { feedback: value }).catch(() => undefined);
+    setMessages((prev) => prev.map((m) => (m.id === message.id ? { ...m, feedback: value } : m)));
   };
 
   return (

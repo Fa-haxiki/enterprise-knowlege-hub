@@ -58,9 +58,14 @@ else
   spawn web "$ROOT/apps/web" pnpm dev
 fi
 
+LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)
+
 echo ""
 echo "全部启动完成："
 echo "  Web:    http://localhost:5173"
+if [ -n "$LAN_IP" ]; then
+  echo "  局域网: http://$LAN_IP:5173  （同事访问入口；需 .env 的 MINIO_PUBLIC_ENDPOINT=$LAN_IP 才能正常上传/预览）"
+fi
 echo "  API:    http://localhost:8080/api/v1/health"
 echo "  日志:   logs/{api,worker,web}.log"
 echo "  停止:   pnpm dev:down"

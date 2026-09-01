@@ -142,6 +142,33 @@ export class ChatService {
     }
   }
 
+  /**
+   * 生成会话标题：短问题直接截取；长问题调用 LLM 总结（限时 5s），
+   * LLM 失败或输出异常时降级为截取首问。
+   */
+  async generateTitle(query: string): Promise<string> {
+    const fallback = query.length > 20 ? `${query.slice(0, 20)}…` : query;
+    if (query.length <= 20) return query;
+    try {
+      const text = await this.llm.invoke(
+        [
+          new SystemMessage(
+            '为用户的第一个问题生成一个简短的对话标题（不超过 15 个字），概括问题主题。' +
+              '只输出标题本身：不要引号、不要书名号、不要标点结尾。',
+          ),
+          // 首问最长 4000 字，标题生成只需开头部分即可把握主题
+          new HumanMessage(query.slice(0, 500)),
+        ],
+        { temperature: 0, timeout: 5_000 },
+      );
+      const title = text.trim().replace(/^["'「『《]+|["'」』》.。…]+$/g, '').trim();
+      if (!title || title.length > 30) return fallback;
+      return title;
+    } catch {
+      return fallback;
+    }
+  }
+
   async listConversations(userId: string, page = 1, pageSize = 20) {
     const [items, total] = await this.conversations.findAndCount({
       where: { userId },

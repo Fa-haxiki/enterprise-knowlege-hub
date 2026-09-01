@@ -1,8 +1,11 @@
-import { ChangeEvent, DragEvent, useEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from 'react';
+import { Link, useParams } from 'react-router-dom';
+import { sha256 } from 'js-sha256';
 import { api, ApiError } from '@/lib/api';
 import DocPreviewModal, { type DocPreview } from '@/components/DocPreviewModal';
+import Pagination from '@/components/Pagination';
 import { useConfirm } from '@/components/ConfirmDialog';
+import { useAuthStore } from '@/store/auth';
 
 interface DocumentItem {
   id: string;
@@ -27,6 +30,7 @@ const STATUS_LABEL: Record<string, { label: string; className: string }> = {
 };
 
 const PROCESSING = new Set(['UPLOADED', 'PARSING', 'CHUNKING', 'INDEXING', 'GRAPHING']);
+const PAGE_SIZE = 10;
 
 const formatSize = (bytes: number) => {
   if (!Number.isFinite(bytes)) return '-';
@@ -36,8 +40,19 @@ const formatSize = (bytes: number) => {
 
 export default function DocumentsPage() {
   const { workspaceId } = useParams<{ workspaceId: string }>();
+  const user = useAuthStore((s) => s.user);
   const [docs, setDocs] = useState<DocumentItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [wsRole, setWsRole] = useState<string | null>(null);
+  const [wsName, setWsName] = useState('');
   const [loading, setLoading] = useState(true);
+  /** 筛选条件：keyword 为输入框即时值，其余为下拉/日期 */
+  const [keyword, setKeyword] = useState('');
+  const [status, setStatus] = useState('');
+  const [docType, setDocType] = useState('');
+  const [dateFrom, setDateFrom] = useState('');
+  const [dateTo, setDateTo] = useState('');
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [uploading, setUploading] = useState(false);
   const [retrying, setRetrying] = useState<string | null>(null);
@@ -56,23 +71,71 @@ export default function DocumentsPage() {
     }
   };
 
-  const load = async () => {
-    if (!workspaceId) return;
-    try {
-      const data = await api.get<{ items: DocumentItem[] }>(
-        `/workspaces/${workspaceId}/documents?page_size=100`,
-      );
-      setDocs(data.items);
-    } catch {
-      setDocs([]);
-    } finally {
-      setLoading(false);
-    }
+  const load = useCallback(
+    async (p = page) => {
+      if (!workspaceId) return;
+      try {
+        const q = new URLSearchParams({ page: String(p), page_size: String(PAGE_SIZE) });
+        if (keyword.trim()) q.set('keyword', keyword.trim());
+        if (status) q.set('status', status);
+        if (docType) q.set('type', docType);
+        if (dateFrom) q.set('date_from', dateFrom);
+        if (dateTo) q.set('date_to', dateTo);
+        const data = await api.get<{ items: DocumentItem[]; total: number }>(
+          `/workspaces/${workspaceId}/documents?${q}`,
+        );
+        setDocs(data.items);
+        setTotal(data.total);
+        // 删除当前页最后一条时回退一页，避免停在空页
+        if (data.items.length === 0 && data.total > 0 && p > 1) {
+          setPage(p - 1);
+          await load(p - 1);
+        }
+      } catch {
+        setDocs([]);
+      } finally {
+        setLoading(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [workspaceId, page, keyword, status, docType, dateFrom, dateTo],
+  );
+
+  const goPage = (p: number) => {
+    setPage(p);
+    void load(p);
   };
 
+  // 筛选条件变化：回到第 1 页并重新加载（搜索框 300ms 防抖）
+  const firstMount = useRef(true);
   useEffect(() => {
-    void load();
+    if (firstMount.current) {
+      firstMount.current = false;
+      return;
+    }
+    const timer = setTimeout(() => {
+      setPage(1);
+      void load(1);
+    }, 300);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keyword, status, docType, dateFrom, dateTo]);
+
+  useEffect(() => {
+    setPage(1);
+    void load(1);
+    // 当前用户在空间内的角色：viewer 隐藏上传/删除/重试等操作入口
+    api
+      .get<{ id: string; name: string; role: string }[]>('/workspaces')
+      .then((list) => {
+        const ws = list.find((w) => w.id === workspaceId);
+        setWsRole(ws?.role ?? null);
+        setWsName(ws?.name ?? '');
+      })
+      .catch(() => setWsRole(null));
   }, [workspaceId]);
+
+  const canEdit = wsRole === 'owner' || wsRole === 'editor' || user?.role === 'sysadmin';
 
   // 处理中文档的进度轮询
   useEffect(() => {
@@ -99,9 +162,14 @@ export default function DocumentsPage() {
     setUploading(true);
     setError('');
     try {
-      // 0. 内容查重预检：前端先算 sha256，命中重复则不上传
-      const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
-      const contentHash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+      // 0. 内容查重预检：前端先算 sha256，命中重复则不上传。
+      // crypto.subtle 仅在安全上下文（localhost/HTTPS）可用，http 局域网访问降级为 js-sha256
+      const buf = await file.arrayBuffer();
+      const contentHash = crypto.subtle
+        ? [...new Uint8Array(await crypto.subtle.digest('SHA-256', buf))]
+            .map((b) => b.toString(16).padStart(2, '0'))
+            .join('')
+        : sha256(buf);
       const dup = await api.post<{ duplicate: boolean; title: string | null }>(
         `/workspaces/${workspaceId}/documents/check-duplicate`,
         { content_hash: contentHash },
@@ -184,17 +252,33 @@ export default function DocumentsPage() {
   return (
     <div className="h-full overflow-y-auto p-6">
       <div className="mx-auto max-w-4xl">
-        <div className="mb-5">
-          <h1 className="text-lg font-semibold text-ink-900">文档管理</h1>
-          <p className="mt-1 text-sm text-ink-400">上传后需部门审核员审核，通过后自动解析、分块、索引并构建知识图谱</p>
-        </div>
+        {/* 面包屑导航栏 */}
+        <nav className="mb-5 flex items-center gap-2 rounded-card border border-border bg-card px-4 py-3 shadow-card">
+          <Link
+            to="/workspaces"
+            className="flex items-center gap-1.5 rounded-lg py-1 pr-2 text-sm font-medium text-ink-600 transition-colors hover:text-brand-600"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="m15 18-6-6 6-6" />
+            </svg>
+            知识空间
+          </Link>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-ink-300">
+            <path d="m9 18 6-6-6-6" />
+          </svg>
+          <span className="truncate text-sm font-semibold text-ink-900">{wsName || '文档管理'}</span>
+          <span className="ml-auto hidden text-xs text-ink-400 sm:block">
+            上传后需部门审核，通过后自动解析入库
+          </span>
+        </nav>
         {error && (
           <p className="mb-4 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
             {error}
           </p>
         )}
 
-        {/* 拖拽上传区 */}
+        {/* 拖拽上传区：viewer 只读，不展示 */}
+        {canEdit && (
         <div
           onDragOver={(e) => {
             e.preventDefault();
@@ -232,6 +316,98 @@ export default function DocumentsPage() {
           </p>
           <p className="mt-1 text-xs text-ink-400">支持 PDF / Word / Excel / PPT / Markdown / TXT</p>
         </div>
+        )}
+
+        {/* 搜索与筛选工具栏 */}
+        <div className="mb-4 flex flex-wrap items-center gap-2 rounded-card border border-border bg-card p-3 shadow-card">
+          <div className="relative min-w-48 flex-1">
+            <svg
+              width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-ink-400"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.3-4.3" />
+            </svg>
+            <input
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              placeholder="搜索文档名称…"
+              className="w-full rounded-lg border border-border bg-card py-1.5 pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-ink-400 focus:border-brand-500"
+            />
+          </div>
+          <select
+            value={status}
+            onChange={(e) => setStatus(e.target.value)}
+            className="rounded-lg border border-border bg-card px-2.5 py-1.5 text-sm text-ink-600 outline-none transition-colors focus:border-brand-500"
+          >
+            <option value="">全部状态</option>
+            <option value="PENDING_REVIEW">待审核</option>
+            <option value="PROCESSING">处理中</option>
+            <option value="READY">可检索</option>
+            <option value="FAILED">失败</option>
+            <option value="REJECTED">已拒绝</option>
+          </select>
+          <select
+            value={docType}
+            onChange={(e) => setDocType(e.target.value)}
+            className="rounded-lg border border-border bg-card px-2.5 py-1.5 text-sm text-ink-600 outline-none transition-colors focus:border-brand-500"
+          >
+            <option value="">全部类型</option>
+            <option value="pdf">PDF</option>
+            <option value="word">Word</option>
+            <option value="excel">Excel</option>
+            <option value="ppt">PPT</option>
+            <option value="md">Markdown</option>
+            <option value="txt">TXT</option>
+            <option value="html">HTML</option>
+          </select>
+          <div className="flex items-center gap-1.5 text-xs text-ink-400">
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              onClick={(e) => {
+                // 点击输入框任意位置都打开日期选择器（默认只有右侧图标可点）
+                try {
+                  e.currentTarget.showPicker();
+                } catch {
+                  /* 旧浏览器不支持 showPicker 时保持默认行为 */
+                }
+              }}
+              className="cursor-pointer rounded-lg border border-border bg-card px-2.5 py-1.5 text-sm text-ink-600 outline-none transition-colors focus:border-brand-500"
+              title="上传日期起"
+            />
+            <span>至</span>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              onClick={(e) => {
+                try {
+                  e.currentTarget.showPicker();
+                } catch {
+                  /* 旧浏览器不支持 showPicker 时保持默认行为 */
+                }
+              }}
+              className="cursor-pointer rounded-lg border border-border bg-card px-2.5 py-1.5 text-sm text-ink-600 outline-none transition-colors focus:border-brand-500"
+              title="上传日期止"
+            />
+          </div>
+          {(keyword || status || docType || dateFrom || dateTo) && (
+            <button
+              onClick={() => {
+                setKeyword('');
+                setStatus('');
+                setDocType('');
+                setDateFrom('');
+                setDateTo('');
+              }}
+              className="rounded-lg px-2.5 py-1.5 text-xs text-ink-400 transition-colors hover:bg-subtle hover:text-ink-600"
+            >
+              清空筛选
+            </button>
+          )}
+        </div>
 
         {/* 文档列表 */}
         {loading ? (
@@ -242,7 +418,9 @@ export default function DocumentsPage() {
           </div>
         ) : docs.length === 0 ? (
           <div className="rounded-card border border-dashed border-border py-14 text-center">
-            <p className="text-sm text-ink-400">暂无文档，上传后自动解析入库</p>
+            <p className="text-sm text-ink-400">
+              {canEdit ? '暂无文档，上传后自动解析入库' : '暂无文档'}
+            </p>
           </div>
         ) : (
           <div className="space-y-2.5">
@@ -251,14 +429,14 @@ export default function DocumentsPage() {
               return (
                 <div
                   key={doc.id}
-                  className="group flex items-center gap-3 rounded-card border border-border bg-card px-4 py-3 shadow-card transition-colors hover:border-brand-500/30"
+                  className="group flex items-center gap-3 rounded-card border border-border bg-card p-4 shadow-card transition-colors hover:border-brand-500/30"
                 >
                   <button
                     onClick={() => void openPreview(doc.id)}
-                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-red-500/10 text-red-500 transition-transform group-hover:scale-105"
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-red-500/10 text-red-500 transition-transform group-hover:scale-105"
                     title="预览文档"
                   >
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
                       <path d="M14 2v6h6" />
                     </svg>
@@ -267,6 +445,8 @@ export default function DocumentsPage() {
                     <div className="truncate text-sm font-medium text-ink-900 transition-colors group-hover:text-brand-700">{doc.title}</div>
                     <div className="mt-0.5 flex items-center gap-2 text-xs text-ink-400">
                       <span>{formatSize(doc.file_size)}</span>
+                      <span>·</span>
+                      <span>{new Date(doc.created_at).toLocaleString()}</span>
                       {doc.error_msg && <span className="truncate text-red-500">{doc.error_msg}</span>}
                       {doc.status === 'REJECTED' && doc.review_note && (
                         <span className="truncate text-red-500">拒绝理由：{doc.review_note}</span>
@@ -284,7 +464,7 @@ export default function DocumentsPage() {
                   <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ${st.className}`}>
                     {st.label}
                   </span>
-                  {doc.status === 'FAILED' && (
+                  {canEdit && doc.status === 'FAILED' && (
                     <button
                       onClick={() => void retry(doc.id)}
                       disabled={retrying === doc.id}
@@ -308,22 +488,32 @@ export default function DocumentsPage() {
                       {retrying === doc.id ? '重试中' : '重试'}
                     </button>
                   )}
-                  <button
-                    onClick={() => remove(doc.id)}
-                    className="shrink-0 rounded-lg p-1.5 text-ink-400 transition-colors hover:bg-red-500/10 hover:text-red-500"
-                    title="删除文档"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M3 6h18" />
-                      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-                      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                    </svg>
-                  </button>
+                  {canEdit && (
+                    <button
+                      onClick={() => remove(doc.id)}
+                      className="shrink-0 rounded-lg p-1.5 text-ink-400 transition-colors hover:bg-red-500/10 hover:text-red-500"
+                      title="删除文档"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M3 6h18" />
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                      </svg>
+                    </button>
+                  )}
                 </div>
               );
             })}
           </div>
         )}
+
+        <Pagination
+          page={page}
+          total={total}
+          pageSize={PAGE_SIZE}
+          onChange={goPage}
+          totalLabel={`共 ${total} 篇文档`}
+        />
 
         {preview && <DocPreviewModal doc={preview} onClose={() => setPreview(null)} />}
         {confirmDialog}

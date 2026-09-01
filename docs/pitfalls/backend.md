@@ -1,5 +1,12 @@
 # NestJS 后端坑点
 
+## 部门成员与空间成员两套模型未打通，部门员工看不到部门空间
+
+- **现象**：财务部普通员工（department_members 有记录）空间列表为空、问答「根据现有资料无法确认」；空间列表修复后问答仍不命中
+- **根因**：① ACL 只认 workspace_members，部门成员身份不参与空间授权；② 问答走 `getWhitelist`（Redis 缓存 600s），列表接口走 DB 直查——代码升级后旧缓存不失效，出现「列表可见但检索白名单仍是旧的」
+- **修复**：`AclService.getWhitelist/getRole` 打通部门成员 → 部门空间默认 viewer；`listMine` 合并部门空间；部门成员/管理员增删、空间改挂部门时主动 `invalidate`；**部署权限模型变更后需清 `acl:whitelist:*` 缓存**
+- **相关**：`apps/api/src/modules/workspaces/acl.service.ts`、`workspaces.service.ts` listMine/update、`departments.service.ts`、`admin.service.ts`
+
 ## AG-UI 客户端发送完整 RunAgentInput，DTO 白名单 400
 
 - **现象**：`POST /agui/chat` 400 `property tools should not exist; property context should not exist; property forwardedProps should not exist`
