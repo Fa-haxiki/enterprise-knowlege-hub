@@ -202,12 +202,16 @@ export class IngestionProcessor extends WorkerHost {
       });
 
       // 必须先落 PG 再写 ES：ES 文档主键用的是 PG 生成的 chunk.id
+      const docType = doc.title.includes('.')
+        ? doc.title.split('.').pop()!.toLowerCase()
+        : 'unknown';
       const saved = await this.chunks.find({ where: { documentId: doc.id }, order: { chunkIndex: 'ASC' } });
       for (const chunk of saved) {
         await this.es.indexChunk({
           chunk_id: chunk.id,
           document_id: doc.id,
           workspace_id: doc.workspaceId,
+          doc_type: docType,
           title: doc.title,
           content: chunk.content,
           heading_path: chunk.headingPath,

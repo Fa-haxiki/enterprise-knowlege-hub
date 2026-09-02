@@ -37,6 +37,7 @@ export class EsService implements OnModuleInit {
             chunk_id: { type: 'keyword' },
             document_id: { type: 'keyword' },
             workspace_id: { type: 'keyword' },
+            doc_type: { type: 'keyword' },
             // ES 8 不支持 mapping 级 boost；标题加权在查询时 title^2 实现
             title: { type: 'text', analyzer: 'standard' },
             content: { type: 'text', analyzer: 'standard' },
@@ -83,10 +84,68 @@ export class EsService implements OnModuleInit {
     }));
   }
 
+  /** 关键词搜索（带高亮片段）：供文档搜索页使用，ACL 前置过滤；支持类型/入库时间筛选 */
+  async searchWithHighlight(
+    query: string,
+    workspaceIds: string[],
+    topK: number,
+    filters?: { docTypes?: string[]; dateFrom?: string; dateTo?: string },
+  ) {
+    const filter: Record<string, unknown>[] = [{ terms: { workspace_id: workspaceIds } }];
+    if (filters?.docTypes?.length) filter.push({ terms: { doc_type: filters.docTypes } });
+    if (filters?.dateFrom || filters?.dateTo) {
+      const range: Record<string, string> = {};
+      if (filters.dateFrom) range.gte = filters.dateFrom;
+      if (filters.dateTo) range.lte = filters.dateTo;
+      filter.push({ range: { created_at: range } });
+    }
+    const res = await this.client.search({
+      index: this.index,
+      size: topK,
+      query: {
+        bool: {
+          must: [
+            {
+              multi_match: {
+                query,
+                fields: ['title^2', 'content'],
+                type: 'best_fields',
+              },
+            },
+          ],
+          filter,
+        },
+      },
+      _source: ['chunk_id', 'document_id', 'workspace_id', 'title', 'heading_path'],
+      highlight: {
+        pre_tags: ['<em>'],
+        post_tags: ['</em>'],
+        fields: {
+          content: { fragment_size: 160, number_of_fragments: 2 },
+          title: {},
+        },
+      },
+    });
+    return res.hits.hits.map((h) => {
+      const src = h._source as Record<string, unknown>;
+      return {
+        chunk_id: src.chunk_id as string,
+        document_id: src.document_id as string,
+        workspace_id: src.workspace_id as string,
+        title: src.title as string,
+        heading_path: (src.heading_path as string[]) ?? [],
+        score: h._score ?? 0,
+        title_highlights: h.highlight?.title ?? [],
+        highlights: h.highlight?.content ?? [],
+      };
+    });
+  }
+
   async indexChunk(doc: {
     chunk_id: string;
     document_id: string;
     workspace_id: string;
+    doc_type: string;
     title: string;
     content: string;
     heading_path: string[];

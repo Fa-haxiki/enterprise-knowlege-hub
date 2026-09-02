@@ -6,6 +6,7 @@ import DocumentsPage from '@/pages/DocumentsPage';
 import ChatPage from '@/pages/ChatPage';
 import AdminPage from '@/pages/AdminPage';
 import ReviewPage from '@/pages/ReviewPage';
+import SearchPage from '@/pages/SearchPage';
 import DepartmentPage from '@/pages/DepartmentPage';
 import Layout from '@/components/Layout';
 
@@ -33,6 +34,7 @@ export default function App() {
         <Route path="workspaces" element={<WorkspacesPage />} />
         <Route path="workspaces/:workspaceId/documents" element={<DocumentsPage />} />
         <Route path="review" element={<ReviewPage />} />
+        <Route path="search" element={<SearchPage />} />
         <Route path="department" element={<DepartmentPage />} />
         <Route path="admin" element={<AdminPage />} />
         <Route path="*" element={<Navigate to="/chat" replace />} />
