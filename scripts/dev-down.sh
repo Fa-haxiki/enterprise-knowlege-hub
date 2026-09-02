@@ -16,7 +16,7 @@ for name in api worker web; do
   fi
 done
 # pnpm dev 会 fork vite 子进程，按端口兜底清理
-lsof -ti :5173 | xargs kill 2>/dev/null || true
+lsof -nP -ti :5173 -sTCP:LISTEN | xargs kill 2>/dev/null || true
 
 echo "==> 停止 Docker 服务..."
 docker compose stop

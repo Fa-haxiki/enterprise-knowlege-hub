@@ -98,8 +98,11 @@ export class StorageService implements OnModuleInit {
     const disposition = `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encoded}`;
     return this.presignClient.presignedGetObject(this.bucket, fileKey, expirySeconds, {
       'response-content-disposition': disposition,
-      // 对象上传时 Content-Type 多为 octet-stream，不覆盖则浏览器无视 inline 直接下载
-      'response-content-type': mimeType ?? 'application/octet-stream',
+      // 对象上传时 Content-Type 多为 octet-stream，不覆盖则浏览器无视 inline 直接下载；
+      // text/* 必须带 charset=utf-8，否则浏览器按 Latin-1 解码，中文 UTF-8 显示为乱码
+      'response-content-type': mimeType?.startsWith('text/')
+        ? `${mimeType}; charset=utf-8`
+        : (mimeType ?? 'application/octet-stream'),
     });
   }
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { api } from '@/lib/api';
+import { PENDING_REVIEW_CHANGED } from '@/lib/events';
 import { useAuthStore } from '@/store/auth';
 import { useThemeStore } from '@/store/theme';
 
@@ -43,17 +44,6 @@ const navItems: NavItem[] = [
     ),
   },
   {
-    to: '/review',
-    label: '文档审核',
-    visible: (u) => u.role === 'sysadmin' || !!u.is_dept_admin,
-    icon: (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M9 12l2 2 4-4" />
-        <path d="M12 3l7 4v5c0 4.5-3 8-7 9-4-1-7-4.5-7-9V7l7-4Z" />
-      </svg>
-    ),
-  },
-  {
     to: '/department',
     label: '我的部门',
     visible: (u) => u.role !== 'sysadmin' && !!u.is_dept_admin,
@@ -85,7 +75,8 @@ export default function Layout() {
 
   const canReview = !!user && (user.role === 'sysadmin' || !!user.is_dept_admin);
 
-  // 待审核角标：挂载/路由变化时刷新；浏览器切回本标签页时再刷新一次（不轮询）
+  // 待审核角标：挂载/路由变化时刷新；浏览器切回本标签页时再刷新一次（不轮询）；
+  // 上传/审核操作通过自定义事件主动通知刷新
   useEffect(() => {
     if (!canReview) return;
     let cancelled = false;
@@ -98,10 +89,13 @@ export default function Layout() {
     const onVisible = () => {
       if (document.visibilityState === 'visible') void fetchCount();
     };
+    const onChanged = () => void fetchCount();
     document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener(PENDING_REVIEW_CHANGED, onChanged);
     return () => {
       cancelled = true;
       document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener(PENDING_REVIEW_CHANGED, onChanged);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canReview, location.pathname]);
@@ -139,8 +133,17 @@ export default function Layout() {
             >
               {item.icon}
               {item.label}
-              {item.to === '/review' && pendingReviewCount > 0 && (
-                <span className="ml-auto flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-semibold text-white">
+              {/* 待审核入口并入知识空间：角标点击直达待审优先视图 */}
+              {item.to === '/workspaces' && pendingReviewCount > 0 && (
+                <span
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    navigate('/workspaces?pending=1');
+                  }}
+                  title="有待审核文档，点击查看"
+                  className="ml-auto flex h-4 min-w-4 cursor-pointer items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-semibold text-white transition-transform hover:scale-110"
+                >
                   {pendingReviewCount > 99 ? '99+' : pendingReviewCount}
                 </span>
               )}

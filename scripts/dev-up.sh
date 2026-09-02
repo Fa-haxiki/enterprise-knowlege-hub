@@ -25,7 +25,8 @@ if [ ! -f apps/api/dist/main.js ] || [ ! -f apps/worker/dist/main.js ]; then
   pnpm -r --filter @ekh/api --filter @ekh/worker build
 fi
 
-port_in_use() { lsof -ti :"$1" >/dev/null 2>&1; }
+# 只检测 LISTEN 状态：lsof -ti :port 会匹配到本机出站连接（如微信连远端 8080），导致误判端口被占
+port_in_use() { lsof -nP -ti :"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 pid_alive() { [ -f "$PID_DIR/$1.pid" ] && kill -0 "$(cat "$PID_DIR/$1.pid")" 2>/dev/null; }
 
 # 守护进程方式启动（fork+setsid），防止脚本退出后服务被托管终端清理

@@ -1,14 +1,12 @@
 import { Module } from '@nestjs/common';
 import { EsService } from './es.service';
 import { RetrievalService } from './retrieval.service';
-import { SearchController } from './search.controller';
-import { WorkspacesModule } from '../workspaces/workspaces.module';
-import { AuthModule } from '../auth/auth.module';
 
+/**
+ * 纯服务模块（worker 也引用）：不要在此挂控制器，
+ * 控制器依赖 @nestjs/swagger / AuthModule，worker 打包会缺模块——见 SearchModule 注释。
+ */
 @Module({
-  // AuthModule 导出 JwtService，是 JwtAuthGuard 的依赖
-  imports: [WorkspacesModule, AuthModule],
-  controllers: [SearchController],
   providers: [EsService, RetrievalService],
   exports: [EsService, RetrievalService],
 })

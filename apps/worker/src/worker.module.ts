@@ -19,6 +19,7 @@ import { UserEntity } from '@ekh/api/database/entities/user.entity';
 import { DepartmentEntity } from '@ekh/api/database/entities/department.entity';
 import { IngestionProcessor } from './processors/ingestion.processor';
 import { MineruClient } from './pipelines/mineru.client';
+import { TextParser } from './pipelines/text-parser';
 import { Chunker } from './pipelines/chunker';
 import { EntityExtractor } from './pipelines/entity-extractor';
 
@@ -59,6 +60,6 @@ import { EntityExtractor } from './pipelines/entity-extractor';
     GraphModule,
     ObservabilityModule,
   ],
-  providers: [IngestionProcessor, MineruClient, Chunker, EntityExtractor, StorageService],
+  providers: [IngestionProcessor, MineruClient, TextParser, Chunker, EntityExtractor, StorageService],
 })
 export class WorkerModule {}

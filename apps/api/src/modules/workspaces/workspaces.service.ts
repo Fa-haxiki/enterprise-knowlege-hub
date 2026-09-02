@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, IsNull, Repository } from 'typeorm';
-import { ErrorCode, SystemRole, WorkspaceRole } from '@ekh/shared';
+import { DocumentStatus, ErrorCode, SystemRole, WorkspaceRole } from '@ekh/shared';
 import { WorkspaceEntity } from '../../database/entities/workspace.entity';
 import { WorkspaceMemberEntity } from '../../database/entities/workspace-member.entity';
 import { DepartmentEntity } from '../../database/entities/department.entity';
@@ -36,8 +36,10 @@ export class WorkspacesService {
     return { items: deps.map((d) => ({ id: d.id, name: d.name })) };
   }
 
-  /** 列出当前用户可见的空间（含角色）：显式成员空间 ∪ 所属部门挂靠的空间（默认 viewer） */
-  async listMine(userId: string) {
+  /** 列出当前用户可见的空间（含角色）：显式成员空间 ∪ 所属部门挂靠的空间（默认 viewer）。
+   *  附带 pending_count（待审核文档数）与 can_review（是否可审核该空间），供审核入口并入空间后展示角标与 Tab */
+  async listMine(user: AuthUser) {
+    const userId = user.userId;
     const rows = await this.members
       .createQueryBuilder('m')
       .innerJoinAndSelect('m.workspace', 'ws')
@@ -56,12 +58,14 @@ export class WorkspacesService {
       created_at: m.workspace.createdAt,
     }));
 
-    // 部门成员可见的部门空间（未显式加入的部分，以 viewer 身份并入）
+    // 部门成员可见的部门空间（未显式加入的部分，以 viewer 身份并入）；
+    // sysadmin 可见全部空间（审核入口并入空间后，需能进入任意空间的待审核 Tab）
+    const isSys = user.role === SystemRole.SYSADMIN;
     const depIds = await this.acl.memberDepartmentIds(userId);
-    if (depIds.length > 0) {
+    if (depIds.length > 0 || isSys) {
       const seen = new Set(items.map((i) => i.id));
       const depWs = await this.workspaces.find({
-        where: { departmentId: In(depIds) },
+        where: isSys ? {} : { departmentId: In(depIds) },
         relations: { department: true },
         order: { createdAt: 'DESC' },
       });
@@ -77,7 +81,25 @@ export class WorkspacesService {
         });
       }
     }
-    return items;
+
+    if (items.length === 0) return [];
+    const adminDeps = await this.acl.adminDepartmentIds(userId);
+    const counts = await this.dataSource
+      .getRepository(DocumentEntity)
+      .createQueryBuilder('d')
+      .select('d.workspace_id', 'wsId')
+      .addSelect('COUNT(*)', 'cnt')
+      .where('d.workspace_id IN (:...ids)', { ids: items.map((i) => i.id) })
+      .andWhere('d.status = :st', { st: DocumentStatus.PENDING_REVIEW })
+      .andWhere('d.deleted_at IS NULL')
+      .groupBy('d.workspace_id')
+      .getRawMany<{ wsId: string; cnt: string }>();
+    const countOf = new Map(counts.map((c) => [c.wsId, Number(c.cnt)]));
+    return items.map((i) => ({
+      ...i,
+      pending_count: countOf.get(i.id) ?? 0,
+      can_review: isSys || (!!i.department && adminDeps.includes(i.department.id)),
+    }));
   }
 
   async create(user: AuthUser, name: string, description?: string, departmentId?: string) {

@@ -110,5 +110,19 @@
 
 - **现象**：新建 SearchController 挂 `@UseGuards(JwtAuthGuard)` 后 API 启动崩溃：`Nest can't resolve dependencies of the JwtAuthGuard (?, ConfigService, Reflector)`
 - **根因**：JwtAuthGuard 构造依赖 JwtService，而 JwtService 由 AuthModule 提供并导出；新模块只 imports 了 WorkspacesModule（拿 AclService），没 imports AuthModule
-- **修复**：新模块 imports 数组补上 `AuthModule`（`apps/api/src/modules/retrieval/retrieval.module.ts`）；凡是用到 JwtAuthGuard 的模块都必须直接/间接导入 AuthModule
-- **相关**：`apps/api/src/modules/retrieval/retrieval.module.ts`、`auth/auth.module.ts`
+- **修复**：新模块 imports 数组补上 `AuthModule`；凡是用到 JwtAuthGuard 的模块都必须直接/间接导入 AuthModule
+- **相关**：`apps/api/src/modules/retrieval/search.module.ts`、`auth/auth.module.ts`
+
+## 被 worker 引用的模块挂控制器，worker 打包缺 @nestjs/swagger 无法启动
+
+- **现象**：worker 启动即崩 `Cannot find module '@nestjs/swagger'`，队列积压、文档卡在 PARSING
+- **根因**：SearchController 挂在 RetrievalModule 上，而 worker 为拿 EsService 也 imports RetrievalModule——webpack 把控制器打进 worker 包，但 worker 的 package.json 没有 @nestjs/swagger
+- **修复**：控制器拆到独立 SearchModule（仅 API AppModule 引用）；RetrievalModule 保持纯服务。**约束：worker 会引用的模块（Retrieval/Graph/Llm 等）一律不挂控制器**
+- **相关**：`apps/api/src/modules/retrieval/search.module.ts`、`retrieval.module.ts`、`apps/worker/src/worker.module.ts`
+
+## MinIO 预签名 URL 缺 charset，md/txt 预览中文乱码
+
+- **现象**：文档预览 iframe 里 md/txt 中文全是乱码（形如 `æ™ºèƒ½`）
+- **根因**：presign 时 `response-content-type` 只写了 `text/markdown` 没带 charset，浏览器对无 charset 的 text/* 按 Latin-1 解码 UTF-8 字节流
+- **修复**：`storage.service.ts` presignDownload 对 `text/*` 类型拼 `; charset=utf-8`；改完需 `pnpm --filter @ekh/api build` 并重启（API 跑 dist 产物，无热更新）
+- **相关**：`apps/api/src/modules/documents/storage.service.ts`、`scripts/dev-up.sh`

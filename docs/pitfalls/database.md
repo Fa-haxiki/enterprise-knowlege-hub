@@ -40,3 +40,10 @@
 - **根因**：`@Column({ nullable: true })` 配 `string | null` 时 TS 反射元数据是 `Object`，TypeORM 无法推断列类型（`design:type` 被联合类型抹掉）
 - **修复**：联合类型字段必须显式写 `type`，如 `@Column({ type: 'uuid', nullable: true })`；本次涉及 granted_by / department_id / reviewed_by 三处
 - **相关**：`apps/api/src/database/entities/department-reviewer.entity.ts`、`workspace.entity.ts`、`document.entity.ts`
+
+## QueryBuilder join 后 orderBy 用列名报 databaseName undefined
+
+- **现象**：`documents.list` 加 `leftJoin('d.uploader','u') + addSelect` 后接口 500：`Cannot read properties of undefined (reading 'databaseName')`，堆栈在 `createOrderByCombinedWithSelectExpression`
+- **根因**：`orderBy('d.created_at')` 用的是数据库列名；无 join 时 TypeORM 容忍，但 join + 分页（skip/take）时 ORDER BY 改走「按实体属性路径解析元数据」的代码路径，列名找不到属性 → undefined
+- **修复**：QueryBuilder 的 orderBy 一律用实体属性路径（`d.createdAt`），不要用数据库列名
+- **相关**：`apps/api/src/modules/documents/documents.service.ts`

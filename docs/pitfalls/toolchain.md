@@ -55,3 +55,9 @@
 - **根因**：worker 直接 import `@ekh/api/modules/observability/langfuse.service`，webpack 构建时将 `langfuse` 标记为 external（在 api 的依赖里），运行时从 worker 的 node_modules 解析不到
 - **修复**：`pnpm --filter @ekh/worker add langfuse`（与 api 同版本）；跨包引用模块时，被引模块的 npm 依赖要在使用方 package.json 同步声明
 - **相关**：`apps/worker/package.json`、`apps/worker/src/worker.module.ts`
+## lsof -ti :port 误判出站连接，dev-up 跳过服务启动
+
+- **现象**：API 进程已死，但 dev-up 显示「API 已在运行 (:8080)，跳过」，服务实际没起
+- **根因**：`lsof -ti :8080` 匹配所有涉及该端口的连接——本机出站连接（如微信连远端服务器 :8080）也会被算成"端口被占"
+- **修复**：端口检测加 LISTEN 过滤：`lsof -nP -ti :$port -sTCP:LISTEN`（dev-up.sh / dev-down.sh 均已改）
+- **相关**：`scripts/dev-up.sh`、`scripts/dev-down.sh`

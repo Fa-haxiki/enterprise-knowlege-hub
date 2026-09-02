@@ -165,10 +165,20 @@ export class GraphService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /** 删除文档的图数据：来源关系边 → Chunk 节点 → 孤儿实体清扫。
+   *  实体全局 MERGE 可能被多篇文档共享，只删已无任何连接的；关系边带 source_chunk_id 可追溯来源 */
   async deleteByDocument(documentId: string) {
     const session = this.driver.session();
     try {
+      await session.run(
+        `MATCH (c:Chunk {document_id: $documentId})
+         WITH collect(c.chunk_id) AS chunkIds
+         MATCH ()-[r]->() WHERE r.source_chunk_id IN chunkIds
+         DELETE r`,
+        { documentId },
+      );
       await session.run(`MATCH (c:Chunk {document_id: $documentId}) DETACH DELETE c`, { documentId });
+      await session.run(`MATCH (n) WHERE NOT n:Chunk AND NOT (n)--() DELETE n`);
     } finally {
       await session.close();
     }

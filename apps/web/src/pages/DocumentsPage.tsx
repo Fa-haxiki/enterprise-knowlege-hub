@@ -1,8 +1,10 @@
 import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { sha256 } from 'js-sha256';
 import { api, ApiError } from '@/lib/api';
+import { notifyPendingReviewChanged, PENDING_REVIEW_CHANGED } from '@/lib/events';
 import DocPreviewModal, { type DocPreview } from '@/components/DocPreviewModal';
+import DocTypeIcon from '@/components/DocTypeIcon';
 import Pagination from '@/components/Pagination';
 import { useConfirm } from '@/components/ConfirmDialog';
 import { useAuthStore } from '@/store/auth';
@@ -14,6 +16,7 @@ interface DocumentItem {
   file_size: number;
   error_msg: string | null;
   review_note: string | null;
+  uploader: { id: string; name: string } | null;
   created_at: string;
 }
 
@@ -40,13 +43,27 @@ const formatSize = (bytes: number) => {
 
 export default function DocumentsPage() {
   const { workspaceId } = useParams<{ workspaceId: string }>();
+  const [searchParams, setSearchParams] = useSearchParams();
   const user = useAuthStore((s) => s.user);
   const [docs, setDocs] = useState<DocumentItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [wsRole, setWsRole] = useState<string | null>(null);
   const [wsName, setWsName] = useState('');
+  /** 审核入口并入空间：canReview 决定「待审核」Tab 是否可见，pendingCount 为角标 */
+  const [canReview, setCanReview] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [tab, setTab] = useState<'all' | 'review'>(searchParams.get('tab') === 'review' ? 'review' : 'all');
   const [loading, setLoading] = useState(true);
+  /** 翻页中：保留当前列表半透明过渡，不闪骨架屏 */
+  const [paging, setPaging] = useState(false);
+  /** 待审核 Tab 的批量选择与驳回状态 */
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [rejectingId, setRejectingId] = useState<string | null>(null);
+  const [reason, setReason] = useState('');
+  const [acting, setActing] = useState(false);
+  const [batchRejecting, setBatchRejecting] = useState(false);
+  const [notice, setNotice] = useState('');
   /** 筛选条件：keyword 为输入框即时值，其余为下拉/日期 */
   const [keyword, setKeyword] = useState('');
   const [status, setStatus] = useState('');
@@ -72,12 +89,16 @@ export default function DocumentsPage() {
   };
 
   const load = useCallback(
-    async (p = page) => {
+    async (p = page, silent = false) => {
       if (!workspaceId) return;
+      // silent：进度轮询等后台刷新不闪骨架屏；Tab 切换/筛选/翻页需立即进入 loading，避免残留旧列表
+      if (!silent) setLoading(true);
       try {
         const q = new URLSearchParams({ page: String(p), page_size: String(PAGE_SIZE) });
         if (keyword.trim()) q.set('keyword', keyword.trim());
-        if (status) q.set('status', status);
+        // 待审核 Tab 固定状态过滤；全部文档 Tab 走用户自选筛选
+        if (tab === 'review') q.set('status', 'PENDING_REVIEW');
+        else if (status) q.set('status', status);
         if (docType) q.set('type', docType);
         if (dateFrom) q.set('date_from', dateFrom);
         if (dateTo) q.set('date_to', dateTo);
@@ -92,18 +113,21 @@ export default function DocumentsPage() {
           await load(p - 1);
         }
       } catch {
+        // 失败时清空总数：否则空列表会配着上一个 Tab/筛选的旧页码导航
         setDocs([]);
+        setTotal(0);
       } finally {
         setLoading(false);
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [workspaceId, page, keyword, status, docType, dateFrom, dateTo],
+    [workspaceId, page, keyword, status, docType, dateFrom, dateTo, tab],
   );
 
   const goPage = (p: number) => {
     setPage(p);
-    void load(p);
+    setPaging(true);
+    void load(p, true).finally(() => setPaging(false));
   };
 
   // 筛选条件变化：回到第 1 页并重新加载（搜索框 300ms 防抖）
@@ -121,21 +145,114 @@ export default function DocumentsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keyword, status, docType, dateFrom, dateTo]);
 
-  useEffect(() => {
-    setPage(1);
-    void load(1);
-    // 当前用户在空间内的角色：viewer 隐藏上传/删除/重试等操作入口
-    api
-      .get<{ id: string; name: string; role: string }[]>('/workspaces')
+  /** 刷新空间元信息（角色/审核权限/待审数），审核操作后同步角标 */
+  const refreshMeta = useCallback(() => {
+    if (!workspaceId) return;
+    interface WsMeta { id: string; name: string; role: string; can_review?: boolean; pending_count?: number }
+    return api
+      .get<WsMeta[]>('/workspaces')
       .then((list) => {
         const ws = list.find((w) => w.id === workspaceId);
         setWsRole(ws?.role ?? null);
         setWsName(ws?.name ?? '');
+        setCanReview(!!ws?.can_review);
+        setPendingCount(ws?.pending_count ?? 0);
       })
       .catch(() => setWsRole(null));
   }, [workspaceId]);
 
+  useEffect(() => {
+    setPage(1);
+    void load(1);
+    // 当前用户在空间内的角色：viewer 隐藏上传/删除/重试等操作入口
+    void refreshMeta();
+  }, [workspaceId]);
+
+  // 上传/审核/删除都会改变待审数：监听事件刷新 Tab 角标（事件由本页或其他页面派发）
+  useEffect(() => {
+    const onChanged = () => void refreshMeta();
+    window.addEventListener(PENDING_REVIEW_CHANGED, onChanged);
+    return () => window.removeEventListener(PENDING_REVIEW_CHANGED, onChanged);
+  }, [refreshMeta]);
+
+  // 从空间卡片「待审 N」角标进入时 URL 带 ?tab=review，同步到 Tab 状态
+  useEffect(() => {
+    if (searchParams.get('tab') === 'review') setTab('review');
+  }, [searchParams]);
+
+  const switchTab = (next: 'all' | 'review') => {
+    if (next === tab) return;
+    setTab(next);
+    setPage(1);
+    // 立即清空旧 Tab 的列表/总数并进入 loading，否则会先闪一下旧列表与旧页码导航
+    setDocs([]);
+    setTotal(0);
+    setLoading(true);
+    setSelected(new Set());
+    setRejectingId(null);
+    setBatchRejecting(false);
+    setNotice('');
+    setSearchParams(next === 'review' ? { tab: 'review' } : {}, { replace: true });
+  };
+
+  // Tab 切换后重新拉列表
+  useEffect(() => {
+    void load(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
   const canEdit = wsRole === 'owner' || wsRole === 'editor' || user?.role === 'sysadmin';
+
+  const review = async (docId: string, approve: boolean, note?: string) => {
+    if (acting) return;
+    setActing(true);
+    try {
+      await api.post(`/documents/${docId}/review`, { approve, reason: note });
+      setRejectingId(null);
+      setReason('');
+      await load();
+      void refreshMeta();
+      notifyPendingReviewChanged();
+    } finally {
+      setActing(false);
+    }
+  };
+
+  const toggleSelect = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  /** 批量审核：通过后小文档自动走同步 embedding（秒级），大文档走 Batch */
+  const reviewBatch = async (approve: boolean, note?: string) => {
+    if (selected.size === 0 || acting) return;
+    setActing(true);
+    setNotice('');
+    try {
+      const res = await api.post<{
+        succeeded: number;
+        failed: number;
+        results: { document_id: string; ok: boolean; message?: string }[];
+      }>('/documents/review-batch', { ids: [...selected], approve, reason: note });
+      if (res.failed > 0) {
+        const names = res.results
+          .filter((r) => !r.ok)
+          .map((r) => docs.find((d) => d.id === r.document_id)?.title ?? r.document_id);
+        setNotice(`成功 ${res.succeeded} 篇，失败 ${res.failed} 篇：${names.join('、')}`);
+      }
+      setSelected(new Set());
+      setBatchRejecting(false);
+      setReason('');
+      await load();
+      void refreshMeta();
+      notifyPendingReviewChanged();
+    } finally {
+      setActing(false);
+    }
+  };
 
   // 处理中文档的进度轮询
   useEffect(() => {
@@ -148,7 +265,7 @@ export default function DocumentsPage() {
             `/documents/${doc.id}/progress`,
           );
           setProgress((prev) => ({ ...prev, [doc.id]: p.percent ?? 0 }));
-          if (!PROCESSING.has(p.status)) await load();
+          if (!PROCESSING.has(p.status)) await load(page, true);
         } catch {
           /* 忽略单次轮询失败 */
         }
@@ -204,6 +321,8 @@ export default function DocumentsPage() {
         part_count: init.part_urls.length,
       });
       await load();
+      // 新文档进入待审核，通知导航角标刷新
+      notifyPendingReviewChanged();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : (err as Error).message);
     } finally {
@@ -232,6 +351,8 @@ export default function DocumentsPage() {
     if (!ok) return;
     await api.delete(`/documents/${id}`);
     await load();
+    // 删除的可能是待审核文档，同步角标
+    notifyPendingReviewChanged();
   };
 
   // 失败重试：从头（解析阶段）完整重跑入库管线
@@ -276,9 +397,41 @@ export default function DocumentsPage() {
             {error}
           </p>
         )}
+        {notice && (
+          <p className="mb-4 rounded-lg bg-amber-500/10 px-3 py-2 text-sm text-amber-600 dark:text-amber-400">
+            {notice}
+          </p>
+        )}
 
-        {/* 拖拽上传区：viewer 只读，不展示 */}
-        {canEdit && (
+        {/* Tab：全部文档 / 待审核（仅审核者可见，角标为待审数） */}
+        {canReview && (
+          <div className="mb-4 flex items-center gap-1 rounded-card border border-border bg-card p-1 shadow-card">
+            <button
+              onClick={() => switchTab('all')}
+              className={`flex-1 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                tab === 'all' ? 'bg-brand-600/10 text-brand-700' : 'text-ink-500 hover:bg-subtle'
+              }`}
+            >
+              全部文档
+            </button>
+            <button
+              onClick={() => switchTab('review')}
+              className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                tab === 'review' ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400' : 'text-ink-500 hover:bg-subtle'
+              }`}
+            >
+              待审核
+              {pendingCount > 0 && (
+                <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500 px-1 text-[10px] font-semibold text-white">
+                  {pendingCount > 99 ? '99+' : pendingCount}
+                </span>
+              )}
+            </button>
+          </div>
+        )}
+
+        {/* 拖拽上传区：viewer 只读不展示；待审核 Tab 下不展示 */}
+        {canEdit && tab === 'all' && (
         <div
           onDragOver={(e) => {
             e.preventDefault();
@@ -318,7 +471,62 @@ export default function DocumentsPage() {
         </div>
         )}
 
-        {/* 搜索与筛选工具栏 */}
+        {/* 待审核 Tab：批量操作栏 */}
+        {tab === 'review' && !loading && docs.length > 0 && (
+          <div className="mb-4 rounded-card border border-border bg-card px-4 py-2.5 shadow-card">
+            <div className="flex items-center gap-3">
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-ink-600">
+                <input
+                  type="checkbox"
+                  checked={selected.size === docs.length && docs.length > 0}
+                  onChange={() =>
+                    setSelected((prev) => (prev.size === docs.length ? new Set() : new Set(docs.map((d) => d.id))))
+                  }
+                  className="h-4 w-4 accent-brand-600"
+                />
+                全选
+              </label>
+              <span className="text-xs text-ink-400">已选 {selected.size} / {docs.length} 篇</span>
+              <div className="ml-auto flex items-center gap-1.5">
+                <button
+                  disabled={acting || selected.size === 0}
+                  onClick={() => void reviewBatch(true)}
+                  className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  批量通过{selected.size > 0 ? `（${selected.size}）` : ''}
+                </button>
+                <button
+                  disabled={acting || selected.size === 0}
+                  onClick={() => setBatchRejecting((v) => !v)}
+                  className="rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-500 transition-colors hover:bg-red-500/10 disabled:opacity-50"
+                >
+                  批量拒绝
+                </button>
+              </div>
+            </div>
+            {batchRejecting && (
+              <div className="mt-2.5 flex items-center gap-2 border-t border-border pt-2.5">
+                <input
+                  autoFocus
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  placeholder={`批量拒绝 ${selected.size} 篇的理由（必填，上传者可见）`}
+                  className="flex-1 rounded-lg border border-border bg-card px-3 py-1.5 text-sm outline-none transition-colors placeholder:text-ink-400 focus:border-red-400"
+                />
+                <button
+                  disabled={acting || !reason.trim()}
+                  onClick={() => void reviewBatch(false, reason.trim())}
+                  className="rounded-lg bg-red-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-red-600 disabled:opacity-50"
+                >
+                  确认拒绝
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 搜索与筛选工具栏：待审核 Tab 状态固定，不展示 */}
+        {tab === 'all' && (
         <div className="mb-4 flex flex-wrap items-center gap-2 rounded-card border border-border bg-card p-3 shadow-card">
           <div className="relative min-w-48 flex-1">
             <svg
@@ -408,6 +616,7 @@ export default function DocumentsPage() {
             </button>
           )}
         </div>
+        )}
 
         {/* 文档列表 */}
         {loading ? (
@@ -419,87 +628,139 @@ export default function DocumentsPage() {
         ) : docs.length === 0 ? (
           <div className="rounded-card border border-dashed border-border py-14 text-center">
             <p className="text-sm text-ink-400">
-              {canEdit ? '暂无文档，上传后自动解析入库' : '暂无文档'}
+              {tab === 'review' ? '没有待审核的文档' : canEdit ? '暂无文档，上传后自动解析入库' : '暂无文档'}
             </p>
           </div>
         ) : (
-          <div className="space-y-2.5">
+          <div className={`space-y-2.5 transition-opacity ${paging ? 'pointer-events-none opacity-50' : ''}`}>
             {docs.map((doc) => {
               const st = STATUS_LABEL[doc.status] ?? STATUS_LABEL.UPLOADED;
               return (
                 <div
                   key={doc.id}
-                  className="group flex items-center gap-3 rounded-card border border-border bg-card p-4 shadow-card transition-colors hover:border-brand-500/30"
+                  className="group rounded-card border border-border bg-card p-4 shadow-card transition-colors hover:border-brand-500/30"
                 >
-                  <button
-                    onClick={() => void openPreview(doc.id)}
-                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-red-500/10 text-red-500 transition-transform group-hover:scale-105"
-                    title="预览文档"
-                  >
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
-                      <path d="M14 2v6h6" />
-                    </svg>
-                  </button>
-                  <div className="min-w-0 flex-1 cursor-pointer" onClick={() => void openPreview(doc.id)}>
-                    <div className="truncate text-sm font-medium text-ink-900 transition-colors group-hover:text-brand-700">{doc.title}</div>
-                    <div className="mt-0.5 flex items-center gap-2 text-xs text-ink-400">
-                      <span>{formatSize(doc.file_size)}</span>
-                      <span>·</span>
-                      <span>{new Date(doc.created_at).toLocaleString()}</span>
-                      {doc.error_msg && <span className="truncate text-red-500">{doc.error_msg}</span>}
-                      {doc.status === 'REJECTED' && doc.review_note && (
-                        <span className="truncate text-red-500">拒绝理由：{doc.review_note}</span>
+                  <div className="flex items-center gap-3">
+                    {tab === 'review' && (
+                      <input
+                        type="checkbox"
+                        checked={selected.has(doc.id)}
+                        onChange={() => toggleSelect(doc.id)}
+                        className="h-4 w-4 shrink-0 accent-brand-600"
+                      />
+                    )}
+                    <button
+                      onClick={() => void openPreview(doc.id)}
+                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-subtle transition-transform group-hover:scale-105"
+                      title="预览文档"
+                    >
+                      <DocTypeIcon title={doc.title} size={24} />
+                    </button>
+                    <div className="min-w-0 flex-1 cursor-pointer" onClick={() => void openPreview(doc.id)}>
+                      <div className="truncate text-sm font-medium text-ink-900 transition-colors group-hover:text-brand-700">{doc.title}</div>
+                      <div className="mt-0.5 flex items-center gap-2 text-xs text-ink-400">
+                        {tab === 'review' && doc.uploader && (
+                          <>
+                            <span>{doc.uploader.name} 上传</span>
+                            <span>·</span>
+                          </>
+                        )}
+                        <span>{formatSize(doc.file_size)}</span>
+                        <span>·</span>
+                        <span>{new Date(doc.created_at).toLocaleString()}</span>
+                        {doc.error_msg && <span className="truncate text-red-500">{doc.error_msg}</span>}
+                        {doc.status === 'REJECTED' && doc.review_note && (
+                          <span className="truncate text-red-500">拒绝理由：{doc.review_note}</span>
+                        )}
+                      </div>
+                      {PROCESSING.has(doc.status) && progress[doc.id] != null && (
+                        <div className="mt-1.5 h-1 w-40 overflow-hidden rounded-full bg-subtle">
+                          <div
+                            className="h-full rounded-full bg-brand-500 transition-all duration-500"
+                            style={{ width: `${progress[doc.id]}%` }}
+                          />
+                        </div>
                       )}
                     </div>
-                    {PROCESSING.has(doc.status) && progress[doc.id] != null && (
-                      <div className="mt-1.5 h-1 w-40 overflow-hidden rounded-full bg-subtle">
-                        <div
-                          className="h-full rounded-full bg-brand-500 transition-all duration-500"
-                          style={{ width: `${progress[doc.id]}%` }}
-                        />
+                    {tab === 'review' ? (
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        <button
+                          disabled={acting}
+                          onClick={() => void review(doc.id, true)}
+                          className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-emerald-700 disabled:opacity-50"
+                        >
+                          通过
+                        </button>
+                        <button
+                          disabled={acting}
+                          onClick={() => setRejectingId(rejectingId === doc.id ? null : doc.id)}
+                          className="rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-500 transition-colors hover:bg-red-500/10 disabled:opacity-50"
+                        >
+                          拒绝
+                        </button>
                       </div>
+                    ) : (
+                      <>
+                        <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ${st.className}`}>
+                          {st.label}
+                        </span>
+                        {canEdit && doc.status === 'FAILED' && (
+                          <button
+                            onClick={() => void retry(doc.id)}
+                            disabled={retrying === doc.id}
+                            className="flex shrink-0 items-center gap-1 rounded-lg border border-brand-500/30 px-2.5 py-1 text-xs font-medium text-brand-600 transition-colors hover:bg-brand-600/10 disabled:opacity-50 dark:text-brand-400"
+                            title="从解析阶段重新入库"
+                          >
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              className={retrying === doc.id ? 'animate-spin' : ''}
+                            >
+                              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                              <path d="M21 3v6h-6" />
+                            </svg>
+                            {retrying === doc.id ? '重试中' : '重试'}
+                          </button>
+                        )}
+                        {canEdit && (
+                          <button
+                            onClick={() => remove(doc.id)}
+                            className="shrink-0 rounded-lg p-1.5 text-ink-400 transition-colors hover:bg-red-500/10 hover:text-red-500"
+                            title="删除文档"
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M3 6h18" />
+                              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+                              <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                            </svg>
+                          </button>
+                        )}
+                      </>
                     )}
                   </div>
-                  <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ${st.className}`}>
-                    {st.label}
-                  </span>
-                  {canEdit && doc.status === 'FAILED' && (
-                    <button
-                      onClick={() => void retry(doc.id)}
-                      disabled={retrying === doc.id}
-                      className="flex shrink-0 items-center gap-1 rounded-lg border border-brand-500/30 px-2.5 py-1 text-xs font-medium text-brand-600 transition-colors hover:bg-brand-600/10 disabled:opacity-50 dark:text-brand-400"
-                      title="从解析阶段重新入库"
-                    >
-                      <svg
-                        width="12"
-                        height="12"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        className={retrying === doc.id ? 'animate-spin' : ''}
+                  {tab === 'review' && rejectingId === doc.id && (
+                    <div className="mt-3 flex items-center gap-2 border-t border-border pt-3">
+                      <input
+                        autoFocus
+                        value={reason}
+                        onChange={(e) => setReason(e.target.value)}
+                        placeholder="拒绝理由（必填，上传者可见）"
+                        className="flex-1 rounded-lg border border-border bg-card px-3 py-1.5 text-sm outline-none transition-colors placeholder:text-ink-400 focus:border-red-400"
+                      />
+                      <button
+                        disabled={acting || !reason.trim()}
+                        onClick={() => void review(doc.id, false, reason.trim())}
+                        className="rounded-lg bg-red-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-red-600 disabled:opacity-50"
                       >
-                        <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-                        <path d="M21 3v6h-6" />
-                      </svg>
-                      {retrying === doc.id ? '重试中' : '重试'}
-                    </button>
-                  )}
-                  {canEdit && (
-                    <button
-                      onClick={() => remove(doc.id)}
-                      className="shrink-0 rounded-lg p-1.5 text-ink-400 transition-colors hover:bg-red-500/10 hover:text-red-500"
-                      title="删除文档"
-                    >
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M3 6h18" />
-                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-                        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                      </svg>
-                    </button>
+                        确认拒绝
+                      </button>
+                    </div>
                   )}
                 </div>
               );
@@ -512,7 +773,7 @@ export default function DocumentsPage() {
           total={total}
           pageSize={PAGE_SIZE}
           onChange={goPage}
-          totalLabel={`共 ${total} 篇文档`}
+          totalLabel={tab === 'review' ? `共 ${total} 篇待审核` : `共 ${total} 篇文档`}
         />
 
         {preview && <DocPreviewModal doc={preview} onClose={() => setPreview(null)} />}
