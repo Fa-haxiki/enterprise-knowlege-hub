@@ -9,6 +9,7 @@ import { DepartmentAdminEntity } from '../../database/entities/department-admin.
 import { DepartmentMemberEntity } from '../../database/entities/department-member.entity';
 import { AuditService } from '../audit/audit.service';
 import { AclService } from '../workspaces/acl.service';
+import { AuthService } from '../auth/auth.service';
 import { BizException } from '../../common/filters/http-exception.filter';
 
 @Injectable()
@@ -24,6 +25,7 @@ export class AdminService {
     private readonly deptMembers: Repository<DepartmentMemberEntity>,
     private readonly audit: AuditService,
     private readonly acl: AclService,
+    private readonly auth: AuthService,
   ) {}
 
   // ---------- 用户管理 ----------
@@ -146,6 +148,11 @@ export class AdminService {
     if (patch.role) user.role = patch.role;
     if (patch.disabled !== undefined) user.disabledAt = patch.disabled ? new Date() : null;
     await this.users.save(user);
+    // 禁用或角色变更立即吊销全部 Refresh Token + 清 Guard 状态缓存，不等 Access 自然过期
+    if (patch.disabled === true || patch.role) {
+      await this.auth.revokeAll(userId);
+    }
+    await this.acl.invalidate(userId);
     this.audit.record({
       userId: adminId,
       action: 'user_update',
@@ -238,6 +245,11 @@ export class AdminService {
     await this.mustGetDepartment(departmentId);
     await this.mustGetUser(userId);
     await this.deptAdmins.save(this.deptAdmins.create({ departmentId, userId, grantedBy: adminId }));
+    // 管理员也属于部门成员：若不在成员表则补一条，保证合并列表与权限模型一致
+    const isMember = await this.deptMembers.exist({ where: { departmentId, userId } });
+    if (!isMember) {
+      await this.deptMembers.save(this.deptMembers.create({ departmentId, userId, addedBy: adminId }));
+    }
     await this.acl.invalidate(userId);
     this.audit.record({
       userId: adminId,
@@ -251,6 +263,11 @@ export class AdminService {
 
   async removeDepartmentAdmin(adminId: string, departmentId: string, userId: string) {
     await this.deptAdmins.delete({ departmentId, userId });
+    // 取消管理员后若该用户不在成员表，自动补为普通成员，保证仍留在部门（避免从列表消失）
+    const isMember = await this.deptMembers.exist({ where: { departmentId, userId } });
+    if (!isMember) {
+      await this.deptMembers.save(this.deptMembers.create({ departmentId, userId, addedBy: adminId }));
+    }
     await this.acl.invalidate(userId);
     this.audit.record({
       userId: adminId,

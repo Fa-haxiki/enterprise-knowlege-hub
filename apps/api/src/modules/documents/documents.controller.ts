@@ -57,6 +57,14 @@ class ReviewBatchDto {
   reason?: string;
 }
 
+class BatchProgressDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(200)
+  @IsUUID('4', { each: true })
+  ids: string[];
+}
+
 class CheckDuplicateDto {
   @IsString()
   @IsNotEmpty()
@@ -196,6 +204,12 @@ export class DocumentsController {
     return this.documents.assertRole(user.userId, id, WorkspaceRole.VIEWER).then(() =>
       this.documents.progress(id),
     );
+  }
+
+  /** 批量进度：列表页对所有处理中文档一次请求，替代逐个轮询以避免触发限流（429） */
+  @Post('documents/progress')
+  batchProgress(@CurrentUser() user: AuthUser, @Body() dto: BatchProgressDto) {
+    return this.documents.batchProgress(user, dto.ids);
   }
 
   @Post('documents/:id/reindex')

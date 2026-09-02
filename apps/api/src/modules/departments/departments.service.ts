@@ -8,6 +8,7 @@ import { DepartmentEntity } from '../../database/entities/department.entity';
 import { DepartmentMemberEntity } from '../../database/entities/department-member.entity';
 import { AuditService } from '../audit/audit.service';
 import { AclService } from '../workspaces/acl.service';
+import { AuthService } from '../auth/auth.service';
 import { BizException } from '../../common/filters/http-exception.filter';
 import type { AuthUser } from '../../common/decorators/current-user.decorator';
 
@@ -22,6 +23,7 @@ export class DepartmentsService {
     private readonly users: Repository<UserEntity>,
     private readonly acl: AclService,
     private readonly audit: AuditService,
+    private readonly auth: AuthService,
   ) {}
 
   /** 我作为管理员负责的部门列表 */
@@ -149,6 +151,12 @@ export class DepartmentsService {
     }
     membership.user.disabledAt = disabled ? new Date() : null;
     await this.users.save(membership.user);
+    // 禁用立即吊销全部 Refresh Token + 清 Guard 状态缓存；启用只需清缓存让 Guard 回源
+    if (disabled) {
+      await this.auth.revokeAll(userId);
+    } else {
+      await this.auth.clearUserStateCache(userId);
+    }
     await this.acl.invalidate(userId);
     this.audit.record({
       userId: operator.userId,

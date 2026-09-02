@@ -112,15 +112,38 @@ export class AuthService {
     return this.issueTokens(user);
   }
 
-  async logout(userId: string, jti?: string) {
-    if (jti) await this.redis.raw.del(this.refreshKey(userId, jti));
+  /** 登出：吊销当前 Refresh Token；同时清 Guard 用户状态缓存。
+   *  传 refreshToken 时按 jti 精确吊销；未传则退化为吊销该用户全部 Refresh（防残留）。 */
+  async logout(userId: string, refreshToken?: string) {
+    if (refreshToken) {
+      try {
+        const payload = await this.jwt.verifyAsync<{ sub: string; jti: string }>(refreshToken, {
+          secret: this.config.get<string>('jwt.secret'),
+        });
+        if (payload.sub === userId) {
+          await this.redis.raw.del(this.refreshKey(userId, payload.jti));
+        }
+      } catch {
+        // refresh 已过期/无效：忽略，仍清状态缓存
+      }
+    } else {
+      await this.revokeAll(userId);
+    }
+    await this.clearUserStateCache(userId);
     this.audit.record({ userId, action: 'logout', resourceType: 'user', resourceId: userId });
   }
 
+  /** 吊销该用户全部 Refresh Token，并清 Guard 用户状态缓存（禁用/降权/登出全部设备时调用） */
   async revokeAll(userId: string) {
     const pattern = this.refreshKey(userId, '*');
     const keys = await this.redis.raw.keys(pattern);
     if (keys.length > 0) await this.redis.raw.del(...keys);
+    await this.clearUserStateCache(userId);
+  }
+
+  /** 清 Guard 的用户状态短缓存，使禁用/降权立即生效（不等 30s TTL） */
+  async clearUserStateCache(userId: string) {
+    await this.redis.raw.del(`auth:user_state:${userId}`);
   }
 
   private async issueTokens(user: UserEntity) {

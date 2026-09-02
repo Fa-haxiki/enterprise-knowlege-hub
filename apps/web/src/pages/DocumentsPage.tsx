@@ -254,21 +254,29 @@ export default function DocumentsPage() {
     }
   };
 
-  // 处理中文档的进度轮询
+  // 处理中文档的进度轮询：单次批量请求获取所有进度，避免逐文档轮询触发限流（429）
   useEffect(() => {
     const processing = docs.filter((d) => PROCESSING.has(d.status));
     if (processing.length === 0) return;
     const timer = setInterval(async () => {
-      for (const doc of processing) {
-        try {
-          const p = await api.get<{ status: string; percent: number | null }>(
-            `/documents/${doc.id}/progress`,
-          );
-          setProgress((prev) => ({ ...prev, [doc.id]: p.percent ?? 0 }));
-          if (!PROCESSING.has(p.status)) await load(page, true);
-        } catch {
-          /* 忽略单次轮询失败 */
+      try {
+        const res = await api.post<{
+          items: { id: string; status: string; percent: number | null }[];
+        }>('/documents/progress', { ids: processing.map((d) => d.id) });
+        // 以服务端返回为准：统计仍处于处理中的数量，全部完成则停止轮询
+        // （不能依赖旧的 docs 快照，否则 load 异步刷新前会持续空轮询已 READY 的文档）
+        const stillProcessing = res.items.filter((it) => PROCESSING.has(it.status)).length;
+        setProgress((prev) => {
+          const next = { ...prev };
+          for (const item of res.items) next[item.id] = item.percent ?? 0;
+          return next;
+        });
+        if (stillProcessing === 0) {
+          clearInterval(timer); // 全部完成：停止轮询
+          await load(page, true); // 刷新列表更新状态列
         }
+      } catch {
+        /* 忽略单次轮询失败 */
       }
     }, 2000);
     return () => clearInterval(timer);
@@ -731,8 +739,9 @@ export default function DocumentsPage() {
                         {canEdit && (
                           <button
                             onClick={() => remove(doc.id)}
-                            className="shrink-0 rounded-lg p-1.5 text-ink-400 transition-colors hover:bg-red-500/10 hover:text-red-500"
-                            title="删除文档"
+                            disabled={PROCESSING.has(doc.status)}
+                            className="shrink-0 rounded-lg p-1.5 text-ink-400 transition-colors hover:bg-red-500/10 hover:text-red-500 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-400"
+                            title={PROCESSING.has(doc.status) ? '文档处理中，暂不可删除' : '删除文档'}
                           >
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                               <path d="M3 6h18" />

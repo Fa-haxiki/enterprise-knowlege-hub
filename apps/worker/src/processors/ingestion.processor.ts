@@ -117,6 +117,7 @@ export class IngestionProcessor extends WorkerHost {
           });
       this.langfuse.endSpan(parseSpan, { pages: parsed.meta.pages, blocks: parsed.blocks.length });
       await this.trackJob(documentId, IngestionStage.PARSE, JobStatus.DONE);
+      await this.assertNotDeleted(documentId);
 
       // 2. 语义分块（纯 CPU，按标题路径聚合 + 超长二次切分）
       await this.transition(doc, DocumentStatus.CHUNKING, 30);
@@ -128,11 +129,13 @@ export class IngestionProcessor extends WorkerHost {
 
       // 3. Embedding（小批量同步 / 大批量 Batch API）+ PGVector/ES 双写
       await this.transition(doc, DocumentStatus.INDEXING, 50);
+      await this.assertNotDeleted(documentId);
       await this.indexChunks(doc, drafts, parsed, job, token, trace);
       await this.trackJob(documentId, IngestionStage.INDEX, JobStatus.DONE);
 
       // 4. 实体抽取 + Neo4j 建图（失败不阻断 READY：检索仍可用，图谱降级）
       await this.transition(doc, DocumentStatus.GRAPHING, 85);
+      await this.assertNotDeleted(documentId);
       try {
         await this.buildGraph(doc, drafts, trace);
         await this.trackJob(documentId, IngestionStage.GRAPH, JobStatus.DONE);
@@ -141,6 +144,7 @@ export class IngestionProcessor extends WorkerHost {
         await this.trackJob(documentId, IngestionStage.GRAPH, JobStatus.FAILED, (e as Error).message);
       }
 
+      await this.assertNotDeleted(documentId);
       await this.transition(doc, DocumentStatus.READY, 100);
       trace?.update({ output: 'ready', metadata: { chunks: await this.chunks.countBy({ documentId: doc.id }) } });
     } catch (e) {
@@ -390,6 +394,17 @@ export class IngestionProcessor extends WorkerHost {
       await this.trackJob(doc.id, IngestionStage.GRAPH, JobStatus.FAILED, (e as Error).message);
     }
     await this.transition(doc, DocumentStatus.READY, 100);
+  }
+
+  /** 阶段写前校验：文档在处理中被软删则抛错中断，由 purge 任务负责清理，避免已删文档被写回索引 */
+  private async assertNotDeleted(documentId: string) {
+    const current = await this.documents.findOne({
+      where: { id: documentId },
+      select: ['id', 'deletedAt'],
+    });
+    if (!current || current.deletedAt) {
+      throw new Error(`document ${documentId} deleted during ingestion, abort`);
+    }
   }
 
   /** 软删除清理：chunk / ES / Neo4j / MinIO 原文件一并去掉 */

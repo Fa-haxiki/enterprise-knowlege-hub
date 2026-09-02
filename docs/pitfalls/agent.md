@@ -1,5 +1,12 @@
 # Agent / LangGraph / RAG 坑点
 
+## Neo4j 实体全局 MERGE 导致跨租户泄漏 + Cypher 标签注入
+
+- **现象**：复杂问答能看到其他空间的供应商/项目关系；LLM 抽取的 `sourceType`/`targetType` 直接拼进 `MERGE (s:${sourceType})`，可注入 Cypher
+- **根因**：实体按 `MERGE (n:Type {name})` 全局共享，多跳/对齐不带 `workspace_id`；Cypher 标签无法参数化，拼接前未强制白名单
+- **修复**：实体/关系 MERGE 键改为 `{name, workspace_id}`；`alignEntities`/`multiHop` 限制在白名单空间的 `Chunk-[:MENTIONS]->Entity` 子图；所有拼进 Cypher 的标签/关系类型走 `ENTITY_TYPES`/`RELATION_TYPES` 白名单（`graph.service.ts`）
+- **相关**：`apps/api/src/modules/graph/graph.service.ts`、`apps/api/src/modules/agents/agent.service.ts`、`apps/worker/src/pipelines/entity-extractor.ts`
+
 ## LangFuse v3 SDK：span 与 generation 的 end() 类型不同
 
 - **现象**：`generation.end({ usageDetails })` 报 `TS2353: 'usageDetails' does not exist in type ...`

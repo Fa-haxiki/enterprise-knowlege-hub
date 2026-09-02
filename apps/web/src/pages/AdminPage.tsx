@@ -633,8 +633,17 @@ function DepartmentAdminCard({
   onAction: (fn: () => Promise<unknown>) => Promise<void>;
   onDelete: () => void;
 }) {
-  const adminCandidates = allUsers.filter((u) => !dep.admins.some((a) => a.id === u.id));
-  const memberCandidates = allUsers.filter((u) => !dep.members.some((m) => m.id === u.id));
+  // 合并管理员与成员为单一列表：管理员置顶，成员带 isAdmin 标记供「设为/取消管理员」按钮
+  const mergedMembers: MemberPerson[] = [
+    ...dep.admins.map((a) => ({ ...a, isAdmin: true })),
+    ...dep.members
+      .filter((m) => !dep.admins.some((a) => a.id === m.id))
+      .map((m) => ({ ...m, isAdmin: false })),
+  ];
+  // 添加成员的候选：既不在成员也不在管理员中的用户
+  const memberCandidates = allUsers.filter(
+    (u) => !mergedMembers.some((m) => m.id === u.id),
+  );
   const { confirm, confirmDialog } = useConfirm();
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState(dep.name);
@@ -666,7 +675,7 @@ function DepartmentAdminCard({
         <div>
           <span className="text-sm font-medium text-ink-900">{dep.name}</span>
           <span className="ml-2 text-xs text-ink-400">
-            {dep.admins.length} 名管理员 · {dep.members.length} 名成员
+            {mergedMembers.length} 名成员（含 {dep.admins.length} 名管理员）
           </span>
           {dep.description && <div className="mt-0.5 text-xs text-ink-400">{dep.description}</div>}
         </div>
@@ -703,70 +712,64 @@ function DepartmentAdminCard({
         </div>
       </div>
 
-      <div className="mt-3 grid gap-4 border-t border-border pt-3 lg:grid-cols-2">
-        <section>
-          <div className="text-xs font-medium text-ink-600">部门管理员（{dep.admins.length}）</div>
-          {/* 列表内部滚动：成员多时不拉长页面 */}
-          <div className="mt-1 max-h-72 overflow-y-auto pr-1">
-            <MemberList
-              people={dep.admins}
-              accent="brand"
-              emptyText="暂无管理员"
-              removeTitle="移除管理员"
-              onRemove={async (uid) => {
-                const a = dep.admins.find((x) => x.id === uid);
-                const ok = await confirm({
-                  title: '移除部门管理员',
-                  description: `「${a?.name ?? uid}」将失去本部门的管理与审核权限。`,
-                  confirmText: '确认移除',
-                });
-                if (ok) await onAction(() => api.delete(`/admin/departments/${dep.id}/admins/${uid}`));
-              }}
-            />
-          </div>
-          <AddPerson
-            label="添加管理员"
+      <div className="mt-3 border-t border-border pt-3">
+        {/* 列表内部滚动：成员多时不拉长页面 */}
+        <div className="max-h-96 overflow-y-auto pr-1">
+          <MemberList
+            people={mergedMembers}
             accent="brand"
-            candidates={adminCandidates}
-            onAdd={(uid) => onAction(() => api.put(`/admin/departments/${dep.id}/admins/${uid}`, {}))}
+            emptyText="暂无成员，从下方添加"
+            removeTitle="移出部门"
+            onToggleAdmin={async (uid, makeAdmin) => {
+              const m = mergedMembers.find((x) => x.id === uid);
+              const ok = await confirm(
+                makeAdmin
+                  ? {
+                      title: '设为管理员',
+                      description: `「${m?.name ?? uid}」将获得本部门的管理与文档审核权限。`,
+                      confirmText: '设为管理员',
+                    }
+                  : {
+                      title: '取消管理员',
+                      description: `「${m?.name ?? uid}」将失去本部门的管理与审核权限，仍保留成员身份。`,
+                      confirmText: '取消管理员',
+                    },
+              );
+              if (!ok) return;
+              await onAction(() =>
+                makeAdmin
+                  ? api.put(`/admin/departments/${dep.id}/admins/${uid}`, {})
+                  : api.delete(`/admin/departments/${dep.id}/admins/${uid}`),
+              );
+            }}
+            onToggleDisabled={async (uid, disabled) => {
+              const m = mergedMembers.find((x) => x.id === uid);
+              const ok = await confirm({
+                title: disabled ? '禁用成员' : '启用成员',
+                description: disabled
+                  ? `禁用后「${m?.name ?? uid}」将无法登录系统。`
+                  : `启用后「${m?.name ?? uid}」可正常登录系统。`,
+                confirmText: disabled ? '确认禁用' : '确认启用',
+              });
+              if (ok) await onAction(() => api.patch(`/departments/${dep.id}/members/${uid}/disabled`, { disabled }));
+            }}
+            onRemove={async (uid) => {
+              const m = mergedMembers.find((x) => x.id === uid);
+              const ok = await confirm({
+                title: '移出部门成员',
+                description: `将「${m?.name ?? uid}」移出本部门，其本部门空间的访问权限将失效。`,
+                confirmText: '确认移出',
+              });
+              if (ok) await onAction(() => api.delete(`/departments/${dep.id}/members/${uid}`));
+            }}
           />
-        </section>
-        <section>
-          <div className="text-xs font-medium text-ink-600">部门成员（{dep.members.length}）</div>
-          <div className="mt-1 max-h-72 overflow-y-auto pr-1">
-            <MemberList
-              people={dep.members}
-              emptyText="暂无成员"
-              removeTitle="移出部门"
-              onToggleDisabled={async (uid, disabled) => {
-                const m = dep.members.find((x) => x.id === uid);
-                const ok = await confirm({
-                  title: disabled ? '禁用成员' : '启用成员',
-                  description: disabled
-                    ? `禁用后「${m?.name ?? uid}」将无法登录系统。`
-                    : `启用后「${m?.name ?? uid}」可正常登录系统。`,
-                  confirmText: disabled ? '确认禁用' : '确认启用',
-                });
-                if (ok) await onAction(() => api.patch(`/departments/${dep.id}/members/${uid}/disabled`, { disabled }));
-              }}
-              onRemove={async (uid) => {
-                const m = dep.members.find((x) => x.id === uid);
-                const ok = await confirm({
-                  title: '移出部门成员',
-                  description: `将「${m?.name ?? uid}」移出本部门，其本部门空间的访问权限将失效。`,
-                  confirmText: '确认移出',
-                });
-                if (ok) await onAction(() => api.delete(`/departments/${dep.id}/members/${uid}`));
-              }}
-            />
-          </div>
-          <AddPerson
-            label="添加成员"
-            candidates={memberCandidates}
-            onAdd={(uid) => onAction(() => api.post(`/departments/${dep.id}/members`, { user_id: uid }))}
-          />
-          <CreateMember onCreate={(data) => onAction(() => api.post(`/departments/${dep.id}/members/create`, data))} />
-        </section>
+        </div>
+        <AddPerson
+          label="添加成员"
+          candidates={memberCandidates}
+          onAdd={(uid) => onAction(() => api.post(`/departments/${dep.id}/members`, { user_id: uid }))}
+        />
+        <CreateMember onCreate={(data) => onAction(() => api.post(`/departments/${dep.id}/members/create`, data))} />
       </div>
       {editing && (
         <div
