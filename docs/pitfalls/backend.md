@@ -105,3 +105,10 @@
 - **根因**：worker 的 TypeORM 用显式 `entities: [...]`（autoLoadEntities: false），WorkspaceEntity 新增 `department` 关系后，DepartmentEntity 未加入 worker 的 entities
 - **修复**：worker.module.ts 的 entities 数组补上 DepartmentEntity；同理 @Global 的 SecurityModule 也需在 worker.module imports 一次全局模块才在 worker 上下文生效
 - **相关**：`apps/worker/src/worker.module.ts`
+
+## 新建模块挂 JwtAuthGuard 报 Nest can't resolve dependencies（缺 AuthModule）
+
+- **现象**：新建 SearchController 挂 `@UseGuards(JwtAuthGuard)` 后 API 启动崩溃：`Nest can't resolve dependencies of the JwtAuthGuard (?, ConfigService, Reflector)`
+- **根因**：JwtAuthGuard 构造依赖 JwtService，而 JwtService 由 AuthModule 提供并导出；新模块只 imports 了 WorkspacesModule（拿 AclService），没 imports AuthModule
+- **修复**：新模块 imports 数组补上 `AuthModule`（`apps/api/src/modules/retrieval/retrieval.module.ts`）；凡是用到 JwtAuthGuard 的模块都必须直接/间接导入 AuthModule
+- **相关**：`apps/api/src/modules/retrieval/retrieval.module.ts`、`auth/auth.module.ts`

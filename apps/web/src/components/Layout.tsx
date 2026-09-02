@@ -23,6 +23,16 @@ const navItems: NavItem[] = [
     ),
   },
   {
+    to: '/search',
+    label: '智能搜索',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="11" cy="11" r="7" />
+        <path d="m21 21-4.3-4.3" />
+      </svg>
+    ),
+  },
+  {
     to: '/workspaces',
     label: '知识空间',
     icon: (
