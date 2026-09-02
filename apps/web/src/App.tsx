@@ -5,7 +5,6 @@ import WorkspacesPage from '@/pages/WorkspacesPage';
 import DocumentsPage from '@/pages/DocumentsPage';
 import ChatPage from '@/pages/ChatPage';
 import AdminPage from '@/pages/AdminPage';
-import ReviewPage from '@/pages/ReviewPage';
 import SearchPage from '@/pages/SearchPage';
 import DepartmentPage from '@/pages/DepartmentPage';
 import Layout from '@/components/Layout';
@@ -33,7 +32,8 @@ export default function App() {
         <Route path="chat/:conversationId" element={<ChatPage />} />
         <Route path="workspaces" element={<WorkspacesPage />} />
         <Route path="workspaces/:workspaceId/documents" element={<DocumentsPage />} />
-        <Route path="review" element={<ReviewPage />} />
+        {/* 审核入口已并入知识空间文档页（?tab=review），旧链接重定向到待审优先视图 */}
+        <Route path="review" element={<Navigate to="/workspaces?pending=1" replace />} />
         <Route path="search" element={<SearchPage />} />
         <Route path="department" element={<DepartmentPage />} />
         <Route path="admin" element={<AdminPage />} />

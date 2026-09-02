@@ -383,8 +383,19 @@ export class AgentService {
       sections.push(`## 知识图谱推理链路\n${chains}`);
     }
 
+    // LLM 自身无时间概念，注入当前北京时间，否则「现在几点」类问题会幻觉
+    const now = new Date().toLocaleString('zh-CN', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      weekday: 'long',
+    });
     const systemPrompt =
-      '你是企业知识库助手。规则：\n' +
+      `你是企业知识库助手。当前时间：${now}（北京时间）。规则：\n` +
       '1. 仅依据「参考资料」与「知识图谱推理链路」回答，不得编造；\n' +
       '2. 引用资料时用 [数字] 角标标注，与参考资料编号对应；\n' +
       '3. 资料不足时明确说明"根据现有资料无法确认"，并建议联系知识管理员；\n' +

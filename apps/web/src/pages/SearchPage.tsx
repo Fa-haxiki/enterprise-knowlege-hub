@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import DocPreviewModal, { type DocPreview } from '@/components/DocPreviewModal';
+import DocTypeIcon from '@/components/DocTypeIcon';
 
 interface ChunkHit {
   chunk_id: string;
@@ -235,10 +236,7 @@ export default function SearchPage() {
               >
                 {/* 标题行：文档名 + 相关度 + 打开箭头（hover 出现） */}
                 <div className="flex items-center gap-2">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-brand-600">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                    <path d="M14 2v6h6" />
-                  </svg>
+                  <DocTypeIcon title={hit.title} size={16} className="shrink-0" />
                   <span className="truncate text-sm font-medium text-ink-900 group-hover:text-brand-700">
                     {hit.title_highlights.length > 0
                       ? hit.title_highlights.map((t, i) => <HighlightedText key={i} text={t} />)

@@ -14,6 +14,7 @@ import { WorkspacesModule } from './modules/workspaces/workspaces.module';
 import { DocumentsModule } from './modules/documents/documents.module';
 import { IngestionModule } from './modules/ingestion/ingestion.module';
 import { RetrievalModule } from './modules/retrieval/retrieval.module';
+import { SearchModule } from './modules/retrieval/search.module';
 import { MemoryModule } from './modules/memory/memory.module';
 import { AgentsModule } from './modules/agents/agents.module';
 import { ChatModule } from './modules/chat/chat.module';
@@ -73,6 +74,7 @@ import { IngestionJobEntity } from './database/entities/ingestion-job.entity';
     DocumentsModule,
     IngestionModule,
     RetrievalModule,
+    SearchModule,
     MemoryModule,
     AgentsModule,
     ChatModule,

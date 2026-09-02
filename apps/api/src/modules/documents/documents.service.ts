@@ -208,9 +208,13 @@ export class DocumentsService {
   ) {
     const qb = this.documents
       .createQueryBuilder('d')
+      .leftJoin('d.uploader', 'u')
+      .addSelect(['u.id', 'u.name'])
       .where('d.workspace_id = :workspaceId', { workspaceId })
       .andWhere('d.deleted_at IS NULL')
-      .orderBy('d.created_at', 'DESC')
+      // 排序必须用实体属性路径（d.createdAt）：join + 分页时 TypeORM 走
+      // createOrderByCombinedWithSelectExpression，按属性名解析元数据，列名会报 databaseName undefined
+      .orderBy('d.createdAt', 'DESC')
       .skip((page - 1) * pageSize)
       .take(pageSize);
     if (filters?.keyword) {
@@ -248,6 +252,7 @@ export class DocumentsService {
         file_size: Number(d.fileSize),
         error_msg: d.errorMsg,
         review_note: d.reviewNote,
+        uploader: d.uploader ? { id: d.uploader.id, name: d.uploader.name } : null,
         created_at: d.createdAt,
       })),
     };

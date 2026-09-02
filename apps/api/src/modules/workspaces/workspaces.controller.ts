@@ -34,7 +34,7 @@ export class WorkspacesController {
 
   @Get()
   list(@CurrentUser() user: AuthUser) {
-    return this.workspaces.listMine(user.userId);
+    return this.workspaces.listMine(user);
   }
 
   /** 部门只读列表（建空间时选择挂靠，仅含我所属的部门），须在 :id 路由之前注册 */

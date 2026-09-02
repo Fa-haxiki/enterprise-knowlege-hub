@@ -1,6 +1,7 @@
 import { FormEvent, MouseEvent, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '@/lib/api';
+import { PENDING_REVIEW_CHANGED } from '@/lib/events';
 import { useAuthStore } from '@/store/auth';
 import { useConfirm } from '@/components/ConfirmDialog';
 
@@ -10,6 +11,10 @@ interface Workspace {
   description: string | null;
   role: 'owner' | 'editor' | 'viewer';
   department: { id: string; name: string } | null;
+  /** 待审核文档数（后端按空间统计） */
+  pending_count: number;
+  /** 当前用户是否可审核该空间（sysadmin 或挂靠部门的管理员） */
+  can_review: boolean;
   created_at: string;
 }
 
@@ -28,6 +33,10 @@ const ROLE_CLS = {
 export default function WorkspacesPage() {
   const user = useAuthStore((s) => s.user);
   const { confirm, confirmDialog } = useConfirm();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  /** 待审优先模式：从导航角标进入（?pending=1），有待审的空间排在前面并高亮 */
+  const pendingMode = searchParams.get('pending') === '1';
   const [list, setList] = useState<Workspace[]>([]);
   const [departments, setDepartments] = useState<DepartmentOption[]>([]);
   const [loading, setLoading] = useState(true);
@@ -60,6 +69,18 @@ export default function WorkspacesPage() {
         if (d.items.length > 0) setDepartmentId((prev) => prev || d.items[0].id);
       })
       .catch(() => setDepartments([]));
+    // 待审数随上传/审核/删除变化：监听事件静默刷新，切回标签页也刷新（不轮询）
+    const onChanged = () => void load();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void load();
+    };
+    window.addEventListener(PENDING_REVIEW_CHANGED, onChanged);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener(PENDING_REVIEW_CHANGED, onChanged);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const create = async (e: FormEvent) => {
@@ -180,6 +201,21 @@ export default function WorkspacesPage() {
           </p>
         )}
 
+        {pendingMode && (
+          <div className="mb-4 flex items-center gap-2 rounded-card border border-amber-500/30 bg-amber-500/5 px-4 py-2.5 text-sm text-amber-600 dark:text-amber-400">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
+            </svg>
+            有待审文档的空间已排在前面并高亮
+            <button
+              onClick={() => setSearchParams({}, { replace: true })}
+              className="ml-auto rounded-lg px-2 py-0.5 text-xs transition-colors hover:bg-amber-500/10"
+            >
+              取消筛选
+            </button>
+          </div>
+        )}
+
         {loading ? (
           <div className="grid gap-3 sm:grid-cols-2">
             {Array.from({ length: 4 }).map((_, i) => (
@@ -188,11 +224,18 @@ export default function WorkspacesPage() {
           </div>
         ) : (
           <div className="grid gap-3 sm:grid-cols-2">
-            {list.map((ws) => (
+            {(pendingMode
+              ? [...list].sort((a, b) => b.pending_count - a.pending_count)
+              : list
+            ).map((ws) => (
               <Link
                 key={ws.id}
                 to={`/workspaces/${ws.id}/documents`}
-                className="group rounded-card border border-border bg-card p-4 shadow-card transition-all hover:-translate-y-0.5 hover:border-brand-500/50 hover:shadow-pop"
+                className={`group rounded-card border bg-card p-4 shadow-card transition-all hover:-translate-y-0.5 hover:border-brand-500/50 hover:shadow-pop ${
+                  pendingMode && ws.pending_count > 0 && ws.can_review
+                    ? 'border-amber-500/50 ring-1 ring-amber-500/30'
+                    : 'border-border'
+                }`}
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-2.5">
@@ -212,16 +255,29 @@ export default function WorkspacesPage() {
                   <div className="mt-2 line-clamp-2 text-sm leading-5 text-ink-400">{ws.description}</div>
                 )}
                 <div className="mt-2 flex items-center justify-between gap-2">
-                  {ws.department ? (
-                    <div className="flex items-center gap-1 text-xs text-ink-400">
-                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6" />
-                      </svg>
-                      {ws.department.name}
-                    </div>
-                  ) : (
-                    <span />
-                  )}
+                  <div className="flex min-w-0 items-center gap-2">
+                    {ws.department && (
+                      <div className="flex items-center gap-1 truncate text-xs text-ink-400">
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6" />
+                        </svg>
+                        {ws.department.name}
+                      </div>
+                    )}
+                    {ws.can_review && ws.pending_count > 0 && (
+                      <button
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          navigate(`/workspaces/${ws.id}/documents?tab=review`);
+                        }}
+                        title="前往审核"
+                        className="flex shrink-0 items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-600 transition-colors hover:bg-amber-500/20 dark:text-amber-400"
+                      >
+                        待审 {ws.pending_count}
+                      </button>
+                    )}
+                  </div>
                   {canManage(ws) && (
                     <div className="flex items-center gap-1.5">
                       <button

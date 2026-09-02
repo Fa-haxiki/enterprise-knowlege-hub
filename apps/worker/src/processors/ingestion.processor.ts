@@ -15,6 +15,7 @@ import { GraphService } from '@ekh/api/modules/graph/graph.service';
 import { RedisService } from '@ekh/api/redis/redis.service';
 import { LangfuseService, type TraceHandle } from '@ekh/api/modules/observability/langfuse.service';
 import { MineruClient, type MineruResult } from '../pipelines/mineru.client';
+import { TextParser } from '../pipelines/text-parser';
 import { Chunker, type ChunkDraft } from '../pipelines/chunker';
 import { EntityExtractor, type ExtractionResult } from '../pipelines/entity-extractor';
 
@@ -60,6 +61,7 @@ export class IngestionProcessor extends WorkerHost {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly storage: StorageService,
     private readonly mineru: MineruClient,
+    private readonly textParser: TextParser,
     private readonly chunker: Chunker,
     private readonly extractor: EntityExtractor,
     private readonly embedding: EmbeddingService,
@@ -104,13 +106,15 @@ export class IngestionProcessor extends WorkerHost {
     });
 
     try {
-      // 1. MinerU 线上解析（异步轮询，期间续 BullMQ 锁）
+      // 1. 解析：md/txt/html 纯文本类走本地解析（MinerU 线上仅支持 PDF/Office），其余走 MinerU 线上解析
       await this.transition(doc, DocumentStatus.PARSING, 5);
       const parseSpan = this.langfuse.createSpan(trace, 'parse', { title: doc.title });
       const file = await this.storage.getObjectBuffer(doc.fileKey);
-      const parsed = await this.mineru.parse(file, doc.title, () => {
-        if (token) void job.extendLock(token, 60_000).catch(() => undefined);
-      });
+      const parsed = TextParser.isTextFile(doc.title)
+        ? this.textParser.parse(file, doc.title)
+        : await this.mineru.parse(file, doc.title, () => {
+            if (token) void job.extendLock(token, 60_000).catch(() => undefined);
+          });
       this.langfuse.endSpan(parseSpan, { pages: parsed.meta.pages, blocks: parsed.blocks.length });
       await this.trackJob(documentId, IngestionStage.PARSE, JobStatus.DONE);
 

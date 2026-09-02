@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import DocTypeIcon from '@/components/DocTypeIcon';
 
 export interface DocPreview {
   url: string;
@@ -63,9 +64,7 @@ export default function DocPreviewModal({ doc, onClose }: { doc: DocPreview; onC
       >
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <div className="flex min-w-0 items-center gap-2">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-brand-600">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" />
-            </svg>
+            <DocTypeIcon title={doc.title} size={16} className="shrink-0" />
             <span className="truncate text-sm font-medium text-ink-900">{doc.title}</span>
           </div>
           <div className="flex shrink-0 items-center gap-1">
@@ -104,9 +103,7 @@ export default function DocPreviewModal({ doc, onClose }: { doc: DocPreview; onC
           <iframe src={doc.url} title={doc.title} className={`min-h-0 flex-1 bg-white ${maximized ? '' : 'rounded-b-card'}`} />
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 text-ink-400">
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><path d="M14 2v6h6" />
-            </svg>
+            <DocTypeIcon title={doc.title} size={48} />
             <p className="text-sm">该格式不支持在线预览</p>
             <a
               href={doc.url}

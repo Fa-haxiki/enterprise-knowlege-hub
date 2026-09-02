@@ -227,9 +227,10 @@ A项目 --USES_SUPPLIER--> 华云科技 --SERVES--> B项目 --OWNED_BY--> 李四
 
 ### 8.1 MinerU 解析
 
-- 部署：独立容器 `mineru-api`（FastAPI 包装），`POST /parse` 接收 MinIO 预签名 URL，返回结构化 JSON（标题层级、段落、表格 HTML、公式 LaTeX、图片锚点、页码 bbox）
-- 超时：单文件 10 min；失败重试 3 次后 `document.status=FAILED` 并通知上传人
-- CPU 可运行；GPU（≥8G 显存）吞吐提升约 5-8 倍
+- 线上 API（mineru.net）：申请签名上传链接 → PUT 上传 → 轮询批量结果 → 下载 zip 解出 `content_list.json`，映射为结构化块（标题层级、段落、表格 HTML、公式 LaTeX、图片锚点、页码 bbox）
+- 支持类型：PDF / Doc / Docx / Ppt / Pptx / Xls / Xlsx（单文件 ≤200MB、≤200 页）
+- **纯文本类（md/txt/html）不走 MinerU**：worker 的 `TextParser` 本地解析为同样的结构化块——md 按 `#` 标题层级/围栏代码块/管道表格（转 HTML）切分，txt 按空行分段，html 剥标签；下游分块/索引/建图链路完全复用
+- 超时：轮询 15 min；失败重试 3 次后 `document.status=FAILED` 并通知上传人
 
 ### 8.2 语义分块策略
 
