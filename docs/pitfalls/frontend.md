@@ -1,5 +1,13 @@
 # 前端坑点（React / Vite / Tailwind）
 
+## 列表页对每个处理中文档单独轮询 progress，批量通过后触发 429
+
+- **现象**：批量审核通过多个文档后，文档列表页大量 `GET /documents/:id/progress` 并发，触发全局限流（120 次/分/IP）返回 429
+- **根因**：`setInterval` 里 `for` 循环对每个处理中文档逐个 `await api.get(.../progress)`，N 个文档 = 每 2s N 个请求
+- **修复**：后端加批量接口 `POST /documents/progress`（body `{ids[]}`，按 workspace 分组校验 ACL + Redis pipeline 批量取进度，一次往返）；前端改为单次批量请求，有文档离开处理中状态时刷新列表
+- **相关**：`apps/api/src/modules/documents/documents.controller.ts`、`documents.service.ts#batchProgress`、`apps/web/src/pages/DocumentsPage.tsx`
+- **教训**：列表页的轮询/刷新类请求，凡是「每行一次」的都要警惕 N 倍放大，优先改批量接口
+
 ## crypto.subtle 在 http 局域网 IP 下不可用（安全上下文限制）
 
 - **现象**：系统改为局域网共享（`http://192.168.x.x:5173`）后，上传在 sha256 预检处抛 `Cannot read properties of undefined (reading 'digest')`

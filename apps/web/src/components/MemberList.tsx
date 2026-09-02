@@ -3,6 +3,8 @@ export interface MemberPerson {
   name: string;
   email: string;
   disabled?: boolean;
+  /** 是否为部门管理员（合并列表时用于显示徽章与「设为/取消管理员」按钮） */
+  isAdmin?: boolean;
 }
 
 interface Props {
@@ -11,16 +13,19 @@ interface Props {
   onToggleDisabled?: (id: string, disabled: boolean) => void;
   /** 传了才显示移除按钮 */
   onRemove?: (id: string) => void;
+  /** 传了才显示「设为/取消管理员」按钮（依 isAdmin 切换文案） */
+  onToggleAdmin?: (id: string, makeAdmin: boolean) => void;
   removeTitle?: string;
   emptyText?: string;
   accent?: 'brand' | 'emerald';
 }
 
-/** 人员垂直列表：头像 + 姓名/邮箱 + 禁用徽章 + 操作按钮，部门成员/管理员展示共用 */
+/** 人员垂直列表：头像 + 姓名/邮箱 + 徽章 + 操作按钮，部门成员/管理员展示共用 */
 export default function MemberList({
   people,
   onToggleDisabled,
   onRemove,
+  onToggleAdmin,
   removeTitle = '移除',
   emptyText = '暂无成员',
   accent = 'emerald',
@@ -42,6 +47,11 @@ export default function MemberList({
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="truncate text-sm text-ink-900">{m.name}</span>
+              {m.isAdmin && (
+                <span className="shrink-0 rounded-full bg-brand-600/10 px-2 py-0.5 text-xs font-medium text-brand-600">
+                  管理员
+                </span>
+              )}
               {m.disabled && (
                 <span className="shrink-0 rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-medium text-red-600">
                   已禁用
@@ -50,6 +60,18 @@ export default function MemberList({
             </div>
             <div className="truncate text-xs text-ink-400">{m.email}</div>
           </div>
+          {onToggleAdmin && (
+            <button
+              onClick={() => onToggleAdmin(m.id, !m.isAdmin)}
+              className={`shrink-0 rounded-lg border px-2.5 py-1 text-xs transition-colors ${
+                m.isAdmin
+                  ? 'border-ink-500/30 text-ink-500 hover:bg-subtle'
+                  : 'border-brand-500/30 text-brand-600 hover:bg-brand-500/10'
+              }`}
+            >
+              {m.isAdmin ? '取消管理员' : '设为管理员'}
+            </button>
+          )}
           {onToggleDisabled && (
             <button
               onClick={() => onToggleDisabled(m.id, !m.disabled)}

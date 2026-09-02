@@ -1,5 +1,12 @@
 # 中间件坑点（ES / Redis / MinIO / Ollama / MinerU）
 
+## 切换网络（家/公司 IP 不同）后上传卡死：MINIO_PUBLIC_ENDPOINT 是旧 IP
+
+- **现象**：文档上传卡在 `upload-init`，API 报 `connect ETIMEDOUT 192.168.70.15:9000`（旧 IP），75s 后 500
+- **根因**：`MINIO_PUBLIC_ENDPOINT` 用于生成预签名上传 URL，写死为某次网络环境的本机 IP；换网络后本机 IP 变了，客户端拿旧 IP 连 MinIO 超时。且该值在 API 启动时经 `configuration.ts` 一次性读取，改 .env 必须重启 API
+- **修复**：`scripts/dev-up.sh` 在启动 API **之前**自动 `ipconfig getifaddr en0/en1` 检测当前 LAN IP，与 .env 不一致则 `sed` 原地更新 `MINIO_PUBLIC_ENDPOINT`，实现换网络后重启即自动适配
+- **相关**：`scripts/dev-up.sh`、`.env`、`apps/api/src/modules/documents/storage.service.ts`（presignClient）
+
 ## ES fs 快照必须配置 path.repo 白名单
 
 - **现象**：注册快照仓库报 `location [/tmp/es-backup] doesn't match any of the locations specified by path.repo because this setting is empty`，且 `wait_for_completion` 不报错时快照静默为空

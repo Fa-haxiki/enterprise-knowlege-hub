@@ -281,6 +281,47 @@ export class DocumentsService {
     };
   }
 
+  /**
+   * 批量进度：一次请求返回多个文档的处理状态，避免列表页对每个处理中文档单独轮询触发限流。
+   * 权限：sysadmin 全量可见；否则按 workspace 分组校验角色，无权的文档跳过（不返回）。
+   */
+  async batchProgress(user: AuthUser, ids: string[]) {
+    const unique = [...new Set(ids)].slice(0, 200); // 上限保护，防止超大 body
+    if (unique.length === 0) return { items: [] };
+    const docs = await this.documents.find({ where: { id: In(unique), deletedAt: IsNull() } });
+
+    // 按 workspace 分组，逐个 workspace 查一次角色（acl 带缓存），避免每文档一次 ACL 查询
+    const roleByWs = new Map<string, WorkspaceRole | null>();
+    const allowed: DocumentEntity[] = [];
+    for (const doc of docs) {
+      if (user.role === SystemRole.SYSADMIN) {
+        allowed.push(doc);
+        continue;
+      }
+      if (!roleByWs.has(doc.workspaceId)) {
+        roleByWs.set(doc.workspaceId, await this.acl.getRole(user.userId, doc.workspaceId));
+      }
+      if (roleByWs.get(doc.workspaceId)) allowed.push(doc);
+    }
+
+    // pipeline 批量取进度 hash，一次 Redis 往返
+    const pipe = this.redis.raw.pipeline();
+    for (const doc of allowed) pipe.hgetall(progressKey(doc.id));
+    const rows = (await pipe.exec()) ?? [];
+
+    const items = allowed.map((doc, i) => {
+      const [, progress] = (rows[i] ?? [null, {}]) as [Error | null, Record<string, string>];
+      return {
+        id: doc.id,
+        status: doc.status,
+        stage: progress?.stage ?? null,
+        percent: progress?.percent ? Number(progress.percent) : null,
+        error_msg: doc.errorMsg,
+      };
+    });
+    return { items };
+  }
+
   async reindex(documentId: string, fromStage: 'parse' | 'chunk' | 'index' | 'graph' = 'index') {
     const doc = await this.mustGet(documentId);
     if (doc.status !== DocumentStatus.READY && doc.status !== DocumentStatus.FAILED) {
@@ -295,6 +336,8 @@ export class DocumentsService {
     const doc = await this.mustGet(documentId);
     doc.deletedAt = new Date();
     await this.documents.save(doc);
+    // 先取消尚未开始的在途入库任务，再入队清理；进行中的任务会在下一阶段写前自检 deletedAt 中断
+    await this.ingestion.removePending(doc.id);
     // 异步清理由 worker 的清理任务完成（chunk/ES/Neo4j/MinIO）
     await this.ingestion.enqueue({ documentId: doc.id, fromStage: 'index' });
     return { deleted: true };

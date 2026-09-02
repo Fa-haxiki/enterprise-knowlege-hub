@@ -1,5 +1,40 @@
 # NestJS 后端坑点
 
+## BullMQ jobId 含冒号导致审核接口 500：Custom Id cannot contain :
+
+- **现象**：文档审核 `POST /documents/:id/review` 返回 500，日志报 `Error: Custom Id cannot contain :`
+- **根因**：为做「同一文档只一个在途任务」的去重，给 `queue.add` 传了 `jobId: \`ingest:${documentId}\``；BullMQ 的自定义 jobId **不允许包含冒号**，审核通过触发 reindex 入队时抛错
+- **修复**：jobId 改用连字符 `ingest-${documentId}`，`removePending` 的 `getJob` 同步改；**给 BullMQ 拼 jobId 时禁用 `:`**
+- **相关**：`apps/api/src/modules/ingestion/ingestion.producer.ts`
+
+## 空库下 API+Worker 并发 synchronize 报 relation "typeorm_metadata" does not exist
+
+- **现象**：数据全量重置后同时启动 API 与 Worker，两者都跑 TypeORM `synchronize`，建表竞态导致 `typeorm_metadata` 等元数据表缺失，API 反复 `Unable to connect to the database. Retrying...` 最终退出，8080 不监听
+- **根因**：`synchronize: true` 在空库首次启动时多进程并发执行，TypeORM 的元数据表创建非原子，互相踩踏
+- **修复**：重置后**先单独启动 API**（`node dist/main.js`）让其独占完成 synchronize 建表，健康检查通过后再 `pnpm migration:run`、再启动 Worker/Web；切勿在空库时让 API 与 Worker 同时首启
+- **相关**：`scripts/reset-all-data.sh`、`scripts/dev-up.sh`、`apps/api/src/app.module.ts`（synchronize 配置）
+
+## 禁用/降权后 Access Token 仍可用：Guard 只验签名，revokeAll 无人调用
+
+- **现象**：管理员禁用账号后，该用户最长约 2h 仍可调问答/管理接口；`AuthService.revokeAll` 存在但无任何调用方
+- **根因**：`JwtAuthGuard` 只校验 JWT 签名与过期，不回源用户状态；禁用/改角色只改 DB，不吊销 Refresh、不清 Guard 缓存
+- **修复**：Guard 增加用户状态短缓存（`auth:user_state:{id}`，TTL 30s）并回源校验 `disabledAt/status/role`；`AdminService.updateUser`、`DepartmentsService.setMemberDisabled` 在禁用/改角色时调用 `revokeAll`；`logout` 按 jti 吊销当前 Refresh（未传则 revokeAll）
+- **相关**：`apps/api/src/modules/auth/guards/jwt-auth.guard.ts`、`auth.service.ts`、`admin.service.ts`、`departments.service.ts`
+
+## 生产环境默认 JWT_SECRET=dev-secret-change-me 可伪造任意用户
+
+- **现象**：未配置 `JWT_SECRET` 时缺省 `dev-secret-change-me`，任何人可签发任意 `sub`/`role` 的 Access Token
+- **根因**：`configuration.ts` 为开发便捷给了弱默认值，生产无强校验
+- **修复**：`main.ts` bootstrap 在 `NODE_ENV=production` 时拒绝弱/短 secret（< 32 字符或常见弱值）并阻止启动
+- **相关**：`apps/api/src/main.ts`、`apps/api/src/config/configuration.ts`
+
+## 删除与入库并发：已删文档被旧任务写回索引
+
+- **现象**：文档解析/嵌入进行中点击删除，purge 清完后旧的 ingest job 仍把 chunk 写进 PG/ES/Neo4j 并标 READY，已删文档「复活」可被检索
+- **根因**：ingest 只在任务开头检查一次 `deletedAt`；同 documentId 可并存多 job，无去重
+- **修复**：BullMQ `jobId: ingest:{documentId}` 去重；删除时 `removePending` 取消未开始的任务；各阶段写前 `assertNotDeleted` 自检，被删则中断交给 purge
+- **相关**：`apps/api/src/modules/ingestion/ingestion.producer.ts`、`apps/worker/src/processors/ingestion.processor.ts`、`apps/api/src/modules/documents/documents.service.ts`
+
 ## 部门成员与空间成员两套模型未打通，部门员工看不到部门空间
 
 - **现象**：财务部普通员工（department_members 有记录）空间列表为空、问答「根据现有资料无法确认」；空间列表修复后问答仍不命中

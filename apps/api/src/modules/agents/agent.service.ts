@@ -7,7 +7,7 @@ import { Complexity, type Citation, type Triple } from '@ekh/shared';
 import { AclService } from '../workspaces/acl.service';
 import { RetrievalService } from '../retrieval/retrieval.service';
 import { MemoryService } from '../memory/memory.service';
-import { GraphService } from '../graph/graph.service';
+import { ENTITY_TYPES, GraphService, type EntityType } from '../graph/graph.service';
 import { LlmService } from '../llm/llm.service';
 import { LangfuseService, type TraceHandle } from '../observability/langfuse.service';
 import { AgentStateAnnotation, type AgentCallbacks, type AgentState } from './agent.state';
@@ -313,13 +313,19 @@ export class AgentService {
   ): Promise<Partial<AgentState>> {
     if (state.routerEntities.length === 0) return { graphTriples: [] };
 
-    const aligned = await this.graphDb.alignEntities(
-      state.routerEntities as { name: string; type: 'Project' | 'Supplier' | 'Person' | 'Policy' | 'Department' }[],
+    // 路由实体类型强制白名单：LLM 输出会拼进 Cypher 标签，未校验可注入
+    const entityTypeSet = new Set<string>(ENTITY_TYPES);
+    const candidates = state.routerEntities.filter(
+      (e): e is { name: string; type: EntityType } =>
+        typeof e.name === 'string' && e.name.length > 0 && entityTypeSet.has(e.type),
     );
+    if (candidates.length === 0) return { graphTriples: [] };
+
+    const aligned = await this.graphDb.alignEntities(candidates, state.aclWhitelist);
     if (aligned.length === 0) return { graphTriples: [] };
 
     const maxHops = this.config.get<number>('rag.graphMaxHops') ?? 3;
-    const triples = await this.graphDb.multiHop(aligned, maxHops);
+    const triples = await this.graphDb.multiHop(aligned, maxHops, state.aclWhitelist);
     this.callbacksOf(config)?.onStatus('graph', `图谱推理路径 ${triples.length} 条`);
     if (triples.length > 0) this.callbacksOf(config)?.onGraphPath(triples);
 

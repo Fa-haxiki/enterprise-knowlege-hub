@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { LlmService } from '@ekh/api/modules/llm/llm.service';
-import type { ExtractedEntity } from '@ekh/api/modules/graph/graph.service';
+import { ENTITY_TYPES, type ExtractedEntity } from '@ekh/api/modules/graph/graph.service';
 
 export interface ExtractedRelation {
   source: string;
@@ -18,7 +18,7 @@ export interface ExtractionResult {
   usage?: { prompt_tokens: number; completion_tokens: number };
 }
 
-const ENTITY_TYPES = ['Project', 'Supplier', 'Person', 'Policy', 'Department'];
+const ENTITY_TYPE_SET = new Set<string>(ENTITY_TYPES);
 
 /** LLM 实体/关系抽取（JSON Schema 约束输出） */
 @Injectable()
@@ -49,9 +49,16 @@ export class EntityExtractor {
       const match = raw.match(/\{[\s\S]*\}/);
       const parsed = JSON.parse(match ? match[0] : raw) as ExtractionResult;
       return {
-        entities: (parsed.entities ?? []).filter((e) => ENTITY_TYPES.includes(e.type)),
+        entities: (parsed.entities ?? []).filter(
+          (e): e is ExtractedEntity => ENTITY_TYPE_SET.has(e.type),
+        ),
         relations: (parsed.relations ?? []).filter(
-          (r) => r.source && r.target && /^[A-Z_]+$/.test(r.relation),
+          (r) =>
+            r.source &&
+            r.target &&
+            ENTITY_TYPE_SET.has(r.sourceType) &&
+            ENTITY_TYPE_SET.has(r.targetType) &&
+            /^[A-Z_]+$/.test(r.relation),
         ),
         usage,
       };
