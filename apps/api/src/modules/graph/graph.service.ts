@@ -10,7 +10,7 @@ export type EntityType = (typeof ENTITY_TYPES)[number];
 const ENTITY_TYPE_SET = new Set<string>(ENTITY_TYPES);
 
 /** 关系类型封闭白名单：与入库抽取提示词保持一致，禁止 LLM 输出任意关系名 */
-const RELATION_TYPES = new Set<string>([
+export const RELATION_TYPES = new Set<string>([
   'USES_SUPPLIER',
   'OWNED_BY',
   'GOVERNED_BY',
@@ -99,19 +99,28 @@ export class GraphService implements OnModuleInit, OnModuleDestroy {
    * 关系边要求 source_chunk_id 所属 Chunk 落在白名单空间，防止跨租户关系泄漏。
    * 查询值全部参数化，禁止字符串拼接。
    */
-  async multiHop(entities: ExtractedEntity[], maxHops: number, workspaceIds: string[]): Promise<Triple[]> {
+  async multiHop(
+    entities: ExtractedEntity[],
+    maxHops: number,
+    workspaceIds: string[],
+    relationTypes?: string[],
+  ): Promise<Triple[]> {
     if (entities.length === 0 || workspaceIds.length === 0) return [];
     const session = this.driver.session();
     try {
       const hops = Math.min(Math.max(maxHops, 1), 3);
+      // 关系类型过滤：仅沿问题意图相关的关系扩展，避免 GOVERNED_BY 等弱关系把图谱发散到不相关节点。
+      // 白名单已在 graphReason 校验，空数组表示不过滤（兼容旧调用）。
+      const relFilter = relationTypes && relationTypes.length > 0 ? relationTypes : [...RELATION_TYPES];
       const res = await session.run(
         `MATCH (n)
          WHERE n.name IN $names
            AND EXISTS { MATCH (c0:Chunk)-[:MENTIONS]->(n) WHERE c0.workspace_id IN $wsIds }
-         MATCH path = (n)-[*1..${hops}]-(m)
+         MATCH path = (n)-[*1..${hops}]->(m)
          UNWIND relationships(path) AS rel
          WITH DISTINCT startNode(rel) AS s, rel, endNode(rel) AS t
          WHERE type(rel) <> 'MENTIONS'
+           AND type(rel) IN $relTypes
            AND EXISTS {
              MATCH (cs:Chunk)-[:MENTIONS]->(s)
              WHERE cs.workspace_id IN $wsIds
@@ -124,13 +133,14 @@ export class GraphService implements OnModuleInit, OnModuleDestroy {
          RETURN DISTINCT coalesce(s.name, s.chunk_id) AS source, type(rel) AS relation,
                 coalesce(t.name, t.chunk_id) AS target
          LIMIT 30`,
-        { names: entities.map((e) => e.name), wsIds: workspaceIds },
+        { names: entities.map((e) => e.name), wsIds: workspaceIds, relTypes: relFilter },
       );
-      return res.records.map((r) => [
+      const triples: Triple[] = res.records.map((r) => [
         r.get('source') as string,
         r.get('relation') as string,
         r.get('target') as string,
       ]);
+      return triples;
     } finally {
       await session.close();
     }

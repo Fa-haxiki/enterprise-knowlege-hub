@@ -263,18 +263,18 @@ export default function DocumentsPage() {
         const res = await api.post<{
           items: { id: string; status: string; percent: number | null }[];
         }>('/documents/progress', { ids: processing.map((d) => d.id) });
-        // 以服务端返回为准：统计仍处于处理中的数量，全部完成则停止轮询
-        // （不能依赖旧的 docs 快照，否则 load 异步刷新前会持续空轮询已 READY 的文档）
+        // 以服务端返回为准，与本地 docs 对比：任一文档状态发生变化（如解析中→就绪）即刷新列表
+        // （不能只在全部完成时刷新，否则部分文档已 READY 但仍有其他文档处理中时，其状态列不更新）
+        const localStatus = new Map(docs.map((d) => [d.id, d.status]));
+        const anyChanged = res.items.some((it) => localStatus.get(it.id) !== it.status);
         const stillProcessing = res.items.filter((it) => PROCESSING.has(it.status)).length;
         setProgress((prev) => {
           const next = { ...prev };
           for (const item of res.items) next[item.id] = item.percent ?? 0;
           return next;
         });
-        if (stillProcessing === 0) {
-          clearInterval(timer); // 全部完成：停止轮询
-          await load(page, true); // 刷新列表更新状态列
-        }
+        if (anyChanged) await load(page, true); // 状态有变化：刷新列表更新状态列
+        if (stillProcessing === 0) clearInterval(timer); // 全部完成：停止轮询
       } catch {
         /* 忽略单次轮询失败 */
       }

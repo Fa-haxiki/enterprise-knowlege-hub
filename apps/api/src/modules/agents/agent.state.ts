@@ -22,6 +22,8 @@ export const AgentStateAnnotation = Annotation.Root({
     reducer: (_a, b) => b,
     default: () => [],
   }),
+  /** 路由判断的问题意图关系类型：多跳仅沿这些关系扩展，防止图谱发散到不相关节点 */
+  routerRelations: Annotation<string[]>({ reducer: (_a, b) => b, default: () => [] }),
   rerankedChunks: Annotation<ChunkHit[]>({ reducer: (_a, b) => b, default: () => [] }),
   graphTriples: Annotation<Triple[]>({ reducer: (_a, b) => b, default: () => [] }),
   longTermMemories: Annotation<string[]>({ reducer: (_a, b) => b, default: () => [] }),
