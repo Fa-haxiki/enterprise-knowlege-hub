@@ -7,7 +7,7 @@ import { Complexity, type Citation, type Triple } from '@ekh/shared';
 import { AclService } from '../workspaces/acl.service';
 import { RetrievalService } from '../retrieval/retrieval.service';
 import { MemoryService } from '../memory/memory.service';
-import { ENTITY_TYPES, GraphService, type EntityType } from '../graph/graph.service';
+import { ENTITY_TYPES, RELATION_TYPES, GraphService, type EntityType } from '../graph/graph.service';
 import { LlmService } from '../llm/llm.service';
 import { LangfuseService, type TraceHandle } from '../observability/langfuse.service';
 import { AgentStateAnnotation, type AgentCallbacks, type AgentState } from './agent.state';
@@ -262,7 +262,15 @@ export class AgentService {
         '判断用户问题是否需要「多实体关联推理」。\n' +
           '- simple：单一事实查询、制度条款、定义类。例："差旅住宿标准是多少"\n' +
           '- complex：涉及 ≥2 个实体的关系/链路/对比/追溯。例："A项目的供应商还服务了哪些项目"\n' +
-          '只输出 JSON：{"complexity":"simple"|"complex","entities":[{"name":"...","type":"Project|Supplier|Person|Policy|Department"}]}',
+          '同时判断该问题涉及的关系类型（relations），仅从以下集合选取（不相关不要选）：\n' +
+          '- USES_SUPPLIER：项目使用/采购供应商\n' +
+          '- SERVES：供应商服务/承接项目\n' +
+          '- OWNED_BY：项目/实体的负责人、归属人\n' +
+          '- GOVERNED_BY：受某政策/制度约束\n' +
+          '- PUBLISHES：发布政策/制度\n' +
+          '- PARTICIPATES_IN：人参与项目\n' +
+          '- BELONGS_TO：属于某部门\n' +
+          '只输出 JSON：{"complexity":"simple"|"complex","entities":[{"name":"...","type":"Project|Supplier|Person|Policy|Department"}],"relations":["SERVES","OWNED_BY"]}',
       ),
       new HumanMessage(state.rewrittenQuery),
     ];
@@ -279,17 +287,23 @@ export class AgentService {
       const parsed = JSON.parse(this.extractJson(raw)) as {
         complexity: Complexity;
         entities?: { name: string; type: string }[];
+        relations?: string[];
       };
       this.callbacksOf(config)?.onStatus(
         'router',
         parsed.complexity === Complexity.COMPLEX ? '复杂问题，启用图谱推理' : '简单问题，混合检索',
       );
+      // 关系类型强制白名单：LLM 输出会用于 Cypher 过滤，未校验可能拼进查询
+      const relations = (parsed.relations ?? []).filter(
+        (r): r is string => typeof r === 'string' && RELATION_TYPES.has(r),
+      );
       return {
         complexity: parsed.complexity === Complexity.COMPLEX ? Complexity.COMPLEX : Complexity.SIMPLE,
         routerEntities: parsed.entities ?? [],
+        routerRelations: relations,
       };
     } catch {
-      return { complexity: Complexity.SIMPLE, routerEntities: [] };
+      return { complexity: Complexity.SIMPLE, routerEntities: [], routerRelations: [] };
     }
   }
 
@@ -325,7 +339,8 @@ export class AgentService {
     if (aligned.length === 0) return { graphTriples: [] };
 
     const maxHops = this.config.get<number>('rag.graphMaxHops') ?? 3;
-    const triples = await this.graphDb.multiHop(aligned, maxHops, state.aclWhitelist);
+    // 仅沿问题意图相关的关系扩展（路由阶段判定），避免 GOVERNED_BY 等弱关系把图谱发散到不相关节点
+    const triples = await this.graphDb.multiHop(aligned, maxHops, state.aclWhitelist, state.routerRelations);
     this.callbacksOf(config)?.onStatus('graph', `图谱推理路径 ${triples.length} 条`);
     if (triples.length > 0) this.callbacksOf(config)?.onGraphPath(triples);
 

@@ -143,7 +143,8 @@ export class AguiController {
           userId: user.userId,
           conversationId: conv.id,
           workspaceId: dto.state?.workspace_id ?? conv.workspaceId ?? undefined,
-          enableGraph: dto.state?.enable_graph ?? true,
+          // 图谱推理已下线（多跳发散产生孤岛，暂不可用）：强制关闭，忽略调用方传值
+          enableGraph: false,
         },
         {
           onStatus: (stage, detail) =>

@@ -66,11 +66,11 @@ export default function LoginPage() {
             一问即达。
           </h1>
           <p className="mt-4 max-w-md text-sm leading-6 text-white/70">
-            基于 Agentic RAG 的企业级知识中枢：混合检索、图谱推理、分层记忆，
+            基于 Agentic RAG 的企业级知识中枢：混合检索、分层记忆，
             让每一份制度文档都成为可对话的知识资产。
           </p>
         </div>
-        <p className="text-xs text-white/40">Agentic RAG · 图谱推理 · 流式问答 · 语音播报</p>
+        <p className="text-xs text-white/40">Agentic RAG · 流式问答 · 语音播报</p>
         {/* 装饰 */}
         <div className="pointer-events-none absolute -right-24 -top-24 h-96 w-96 rounded-full bg-white/10 blur-3xl" />
         <div className="pointer-events-none absolute -bottom-32 -left-16 h-80 w-80 rounded-full bg-black/10 blur-3xl" />

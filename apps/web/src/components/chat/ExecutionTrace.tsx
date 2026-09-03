@@ -64,6 +64,8 @@ export default function ExecutionTrace({
     return i === -1 ? STEP_ORDER.length : i;
   };
   const rows = all
+    // 图谱推理已下线：历史消息的 nodeLatencies 仍含 graph_reason，过滤掉不再展示
+    .filter((s) => s.name !== 'graph_reason')
     .filter((s) => s.status === 'running' || (s.latencyMs ?? 0) >= 50)
     .sort((a, b) => orderOf(a.name) - orderOf(b.name));
 

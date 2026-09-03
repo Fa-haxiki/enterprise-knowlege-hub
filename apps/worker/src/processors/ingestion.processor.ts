@@ -371,16 +371,36 @@ export class IngestionProcessor extends WorkerHost {
     }
   }
 
-  /** 仅重建图谱：用已落库的分片重跑实体抽取（不清空索引，文档最终仍标 READY） */
+  /** 仅重建图谱：用已落库的分片重跑实体抽取（不清空索引，文档最终仍标 READY）。
+   *  重建前先清掉该文档旧图数据，避免 MERGE 残留已被新规则过滤的噪声实体/关系。
+   *  抽取走与 buildGraph 相同的 4 路并发 worker pool，避免串行逐 chunk 打 LLM 过慢/卡死。 */
   private async rebuildGraphOnly(doc: DocumentEntity) {
     await this.transition(doc, DocumentStatus.GRAPHING, 85);
     try {
+      await this.graphDb.deleteByDocument(doc.id).catch(() => undefined);
       const saved = await this.chunks.find({ where: { documentId: doc.id }, order: { chunkIndex: 'ASC' } });
-      for (const chunk of saved) {
-        const result = await this.extractor.extract(chunk.content);
-        if (result.entities.length === 0 && result.relations.length === 0) continue;
+
+      // 并发抽取：多个协程抢同一 cursor，结果按下标回填，单 chunk 失败只跳过
+      const results: (ExtractionResult | null)[] = new Array(saved.length).fill(null);
+      let cursor = 0;
+      const runWorker = async () => {
+        while (cursor < saved.length) {
+          const i = cursor++;
+          try {
+            results[i] = await this.extractor.extract(saved[i].content);
+          } catch (e) {
+            this.logger.warn(`rebuild chunk ${i} extract failed (skipped): ${(e as Error).message}`);
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: GRAPH_EXTRACT_CONCURRENCY }, () => runWorker()));
+
+      // 抽完后按 chunk 顺序写图，避免并发 upsert 打乱关系
+      for (let i = 0; i < saved.length; i++) {
+        const result = results[i];
+        if (!result || (result.entities.length === 0 && result.relations.length === 0)) continue;
         await this.graphDb.upsertGraph({
-          chunkId: chunk.id,
+          chunkId: saved[i].id,
           documentId: doc.id,
           workspaceId: doc.workspaceId,
           entities: result.entities,

@@ -15,7 +15,6 @@ import type { AgentStep, Conversation, Message } from '@/components/chat/types';
 const STAGE_TO_NODE: Record<string, string> = {
   router: 'complexity_router',
   retrieval: 'hybrid_retrieve',
-  graph: 'graph_reason',
 };
 
 function updateLastStep(steps: AgentStep[], pred: (s: AgentStep) => boolean, patch: Partial<AgentStep>): AgentStep[] {
