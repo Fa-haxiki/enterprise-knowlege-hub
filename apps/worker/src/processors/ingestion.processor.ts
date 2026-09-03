@@ -18,6 +18,7 @@ import { MineruClient, type MineruResult } from '../pipelines/mineru.client';
 import { TextParser } from '../pipelines/text-parser';
 import { Chunker, type ChunkDraft } from '../pipelines/chunker';
 import { EntityExtractor, type ExtractionResult } from '../pipelines/entity-extractor';
+import { EntityAligner } from '../pipelines/entity-aligner';
 
 /** BullMQ 任务载荷。fromStage 仅用于「从某阶段重跑」，缺省则走全量管线。 */
 interface IngestionJobData {
@@ -28,8 +29,8 @@ interface IngestionJobData {
 /** 前端轮询入库进度的 Redis Hash 键；TTL 1h，见 transition()。 */
 const progressKey = (id: string) => `doc:progress:${id}`;
 
-/** 实体抽取并发度：LLM 调用是 graph 阶段瓶颈，4 路并发将 8 chunks 从 ~3.5min 压到 ~1min */
-const GRAPH_EXTRACT_CONCURRENCY = 4;
+/** 实体抽取并发度：走路由小模型，2 路避免额度突发；对齐不再打对话模型 */
+const GRAPH_EXTRACT_CONCURRENCY = 2;
 
 /**
  * 文档入库消费者（BullMQ queue=`ingestion`，同时处理 2 份文档）。
@@ -38,7 +39,7 @@ const GRAPH_EXTRACT_CONCURRENCY = 4;
  *   1. parse   MinerU 解析 PDF/Office → 结构化 blocks
  *   2. chunk   按标题层级 + 段落边界切成语义块
  *   3. index   Embedding 后双写 PGVector（语义检索）+ ES（关键词检索）
- *   4. graph   LLM 抽实体/关系写入 Neo4j；失败只降级，不阻断 READY
+ *   4. graph   LLM 抽实体/关系 → 实体对齐（挂到空间已有实体）→ 写入 Neo4j；失败只降级，不阻断 READY
  *
  * 旁路：
  *   - 文档已软删除 → purge 清 chunk / ES / Neo4j / MinIO
@@ -64,6 +65,7 @@ export class IngestionProcessor extends WorkerHost {
     private readonly textParser: TextParser,
     private readonly chunker: Chunker,
     private readonly extractor: EntityExtractor,
+    private readonly aligner: EntityAligner,
     private readonly embedding: EmbeddingService,
     private readonly es: EsService,
     private readonly graphDb: GraphService,
@@ -137,7 +139,7 @@ export class IngestionProcessor extends WorkerHost {
       await this.transition(doc, DocumentStatus.GRAPHING, 85);
       await this.assertNotDeleted(documentId);
       try {
-        await this.buildGraph(doc, drafts, trace);
+        await this.extractAndBuild(doc, trace);
         await this.trackJob(documentId, IngestionStage.GRAPH, JobStatus.DONE);
       } catch (e) {
         this.logger.warn(`graph stage degraded: ${(e as Error).message}`);
@@ -303,29 +305,33 @@ export class IngestionProcessor extends WorkerHost {
   }
 
   /**
-   * 实体抽取 + Neo4j 写入：
-   *   - 用共享 cursor 拉起 N 个 worker，4 路并发打 LLM（单 chunk 失败只跳过）
-   *   - 全部抽完后再按 chunk 顺序写图，避免并发 upsert 打乱关系
-   *   - LLM 用量汇总成一条 Langfuse generation（失败也落埋点）
+   * 实体抽取 + 实体对齐 + Neo4j 写入（全量管线 graph 阶段与「仅重建图谱」共用）：
+   *   - 先清该文档旧图数据：重建 / BullMQ 重试幂等，且索引阶段重建分片后 chunk_id 已变化，旧 Chunk 节点必须清掉
+   *   - 用共享 cursor 拉起 N 个 worker，4 路并发打 LLM（单 chunk 失败只跳过），抽取时带上《标题》> 章节路径上下文
+   *   - 全部抽完后交给 EntityAligner：文档内归并 → 与空间已有实体对齐（规则 / embedding）→ 按实体 id 写图
+   *   - 抽取 LLM 用量汇总成一条 Langfuse generation（失败也落埋点）；对齐阶段的埋点由 aligner 自己记录
    */
-  private async buildGraph(doc: DocumentEntity, drafts: ChunkDraft[], trace?: TraceHandle | null) {
-    const span = this.langfuse.createSpan(trace ?? null, 'graph', { chunks: drafts.length });
+  private async extractAndBuild(doc: DocumentEntity, trace?: TraceHandle | null) {
+    const saved = await this.chunks.find({ where: { documentId: doc.id }, order: { chunkIndex: 'ASC' } });
+    const span = this.langfuse.createSpan(trace ?? null, 'graph', { chunks: saved.length });
     const generation = this.langfuse.createGeneration(trace ?? null, {
       name: 'entity_extract',
       model: this.config.get<string>('llm.model') ?? 'unknown',
-      input: { chunks: drafts.length },
+      input: { chunks: saved.length },
     });
-    const saved = await this.chunks.find({ where: { documentId: doc.id }, order: { chunkIndex: 'ASC' } });
 
     // 简易 worker pool：多个协程抢同一个 cursor，结果按原下标回填
-    const results: (ExtractionResult | null)[] = new Array(drafts.length).fill(null);
+    const results: (ExtractionResult | null)[] = new Array(saved.length).fill(null);
     let cursor = 0;
     let failedChunks = 0;
     const runWorker = async () => {
-      while (cursor < drafts.length) {
+      while (cursor < saved.length) {
         const i = cursor++;
         try {
-          results[i] = await this.extractor.extract(drafts[i].content);
+          results[i] = await this.extractor.extract(saved[i].content, {
+            title: doc.title,
+            headingPath: saved[i].headingPath,
+          });
         } catch (e) {
           failedChunks++;
           this.logger.warn(`chunk ${i} entity extract failed (skipped): ${(e as Error).message}`);
@@ -338,29 +344,33 @@ export class IngestionProcessor extends WorkerHost {
     let promptTokens = 0;
     let completionTokens = 0;
     try {
+      await this.graphDb.deleteByDocument(doc.id);
       await Promise.all(Array.from({ length: GRAPH_EXTRACT_CONCURRENCY }, () => runWorker()));
-
-      for (let i = 0; i < drafts.length; i++) {
-        const result = results[i];
+      for (const result of results) {
         if (!result) continue;
         promptTokens += result.usage?.prompt_tokens ?? 0;
         completionTokens += result.usage?.completion_tokens ?? 0;
-        if (result.entities.length === 0 && result.relations.length === 0) continue;
         entities += result.entities.length;
         relations += result.relations.length;
-        await this.graphDb.upsertGraph({
-          chunkId: saved[i].id,
-          documentId: doc.id,
-          workspaceId: doc.workspaceId,
-          entities: result.entities,
-          relations: result.relations,
-        });
       }
       this.langfuse.endGeneration(generation, {
         output: `entities=${entities} relations=${relations} failedChunks=${failedChunks}`,
         usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens },
       });
-      this.langfuse.endSpan(span, { entities, relations, failedChunks });
+
+      const stats = await this.aligner.alignAndWrite(
+        {
+          workspaceId: doc.workspaceId,
+          documentId: doc.id,
+          chunks: saved.map((c, i) => ({ chunkId: c.id, extraction: results[i] })),
+        },
+        trace,
+      );
+      this.langfuse.endSpan(span, { extracted: { entities, relations, failedChunks }, aligned: { ...stats } });
+      this.logger.log(
+        `document ${doc.id} graph built: chunks=${saved.length} extracted=${entities}/${relations} ` +
+          `entities=${stats.docEntities} created=${stats.created} merged=${stats.ruleMerged + stats.autoMerged}`,
+      );
     } catch (e) {
       this.langfuse.endGeneration(generation, {
         output: `failed: ${(e as Error).message}`,
@@ -371,47 +381,22 @@ export class IngestionProcessor extends WorkerHost {
     }
   }
 
-  /** 仅重建图谱：用已落库的分片重跑实体抽取（不清空索引，文档最终仍标 READY）。
-   *  重建前先清掉该文档旧图数据，避免 MERGE 残留已被新规则过滤的噪声实体/关系。
-   *  抽取走与 buildGraph 相同的 4 路并发 worker pool，避免串行逐 chunk 打 LLM 过慢/卡死。 */
+  /** 仅重建图谱：用已落库的分片重跑抽取 + 对齐（不清空索引，文档最终仍标 READY） */
   private async rebuildGraphOnly(doc: DocumentEntity) {
     await this.transition(doc, DocumentStatus.GRAPHING, 85);
+    const trace = this.langfuse.createTrace('graph_rebuild', {
+      documentId: doc.id,
+      title: doc.title,
+      workspaceId: doc.workspaceId,
+    });
     try {
-      await this.graphDb.deleteByDocument(doc.id).catch(() => undefined);
-      const saved = await this.chunks.find({ where: { documentId: doc.id }, order: { chunkIndex: 'ASC' } });
-
-      // 并发抽取：多个协程抢同一 cursor，结果按下标回填，单 chunk 失败只跳过
-      const results: (ExtractionResult | null)[] = new Array(saved.length).fill(null);
-      let cursor = 0;
-      const runWorker = async () => {
-        while (cursor < saved.length) {
-          const i = cursor++;
-          try {
-            results[i] = await this.extractor.extract(saved[i].content);
-          } catch (e) {
-            this.logger.warn(`rebuild chunk ${i} extract failed (skipped): ${(e as Error).message}`);
-          }
-        }
-      };
-      await Promise.all(Array.from({ length: GRAPH_EXTRACT_CONCURRENCY }, () => runWorker()));
-
-      // 抽完后按 chunk 顺序写图，避免并发 upsert 打乱关系
-      for (let i = 0; i < saved.length; i++) {
-        const result = results[i];
-        if (!result || (result.entities.length === 0 && result.relations.length === 0)) continue;
-        await this.graphDb.upsertGraph({
-          chunkId: saved[i].id,
-          documentId: doc.id,
-          workspaceId: doc.workspaceId,
-          entities: result.entities,
-          relations: result.relations,
-        });
-      }
+      await this.extractAndBuild(doc, trace);
       await this.trackJob(doc.id, IngestionStage.GRAPH, JobStatus.DONE);
-      this.logger.log(`document ${doc.id} graph rebuilt: ${saved.length} chunks`);
+      trace?.update({ output: 'ready' });
     } catch (e) {
       this.logger.warn(`graph rebuild degraded: ${(e as Error).message}`);
       await this.trackJob(doc.id, IngestionStage.GRAPH, JobStatus.FAILED, (e as Error).message);
+      trace?.update({ output: 'failed', metadata: { error: (e as Error).message } });
     }
     await this.transition(doc, DocumentStatus.READY, 100);
   }

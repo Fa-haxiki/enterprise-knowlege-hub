@@ -1,8 +1,10 @@
 import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { api, ApiError } from '@/lib/api';
+import { graphApi } from '@/lib/graph';
 import MemberList, { type MemberPerson } from '@/components/MemberList';
 import Pagination from '@/components/Pagination';
 import { useConfirm } from '@/components/ConfirmDialog';
+import { useFeaturesStore, type FeatureFlag, type FeatureFlags } from '@/store/features';
 
 interface AdminUser {
   id: string;
@@ -46,18 +48,19 @@ const inputCls =
   'rounded-lg border border-border bg-card px-3 py-1.5 text-sm outline-none transition-colors placeholder:text-ink-400 focus:border-brand-500';
 
 export default function AdminPage() {
-  const [tab, setTab] = useState<'users' | 'departments'>('users');
+  const [tab, setTab] = useState<'users' | 'departments' | 'settings'>('users');
   return (
     <div className="h-full overflow-y-auto p-6">
       <div className="mx-auto max-w-5xl">
         <h1 className="text-lg font-semibold text-ink-900">管理后台</h1>
-        <p className="mb-5 mt-1 text-sm text-ink-400">账号审核、用户管理与部门管理员配置</p>
+        <p className="mb-5 mt-1 text-sm text-ink-400">账号审核、用户管理、部门管理员配置与系统功能开关</p>
 
         <div className="mb-5 flex gap-1 rounded-lg border border-border bg-card p-1 shadow-card w-fit">
           {(
             [
               { key: 'users', label: '用户管理' },
               { key: 'departments', label: '部门管理' },
+              { key: 'settings', label: '系统设置' },
             ] as const
           ).map((t) => (
             <button
@@ -72,8 +75,165 @@ export default function AdminPage() {
           ))}
         </div>
 
-        {tab === 'users' ? <UsersPanel /> : <DepartmentsPanel />}
+        {tab === 'users' && <UsersPanel />}
+        {tab === 'departments' && <DepartmentsPanel />}
+        {tab === 'settings' && <SettingsPanel />}
       </div>
+    </div>
+  );
+}
+
+/* ---------------- 系统设置：功能开关 + 图谱全量重建 ---------------- */
+
+const FEATURE_META: Record<
+  FeatureFlag,
+  { label: string; description: string; offConsequence: string; onConsequence: string }
+> = {
+  graph_reasoning: {
+    label: '问答图谱推理',
+    description: '复杂问题在混合检索后追加图谱多跳推理，回答中展示推理链路子图。',
+    offConsequence: '下架后：问答不再使用图谱推理，回答与历史消息中不再展示推理链路；已建图谱数据保留，入库建图继续进行，可随时重新上架。',
+    onConsequence: '上架后：复杂问题会调用 Neo4j 多跳推理并在回答中展示推理链路，问答耗时略有增加。',
+  },
+  graph_explorer: {
+    label: '知识图谱页面',
+    description: '侧边导航「知识图谱」与文档页「查看图谱」入口，以及空间图谱查询接口。',
+    offConsequence: '下架后：导航入口隐藏，直接访问图谱页面与查询接口将被拒绝；图谱数据保留，可随时重新上架。',
+    onConsequence: '上架后：所有空间成员可浏览本空间的知识图谱拓扑与实体详情。',
+  },
+};
+
+function SettingsPanel() {
+  const { flags, fetch: fetchFlags, set: setFlags } = useFeaturesStore();
+  const { confirm, confirmDialog } = useConfirm();
+  const [busy, setBusy] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null);
+
+  useEffect(() => {
+    void fetchFlags();
+  }, [fetchFlags]);
+
+  useEffect(() => {
+    if (!message) return;
+    const t = setTimeout(() => setMessage(null), 5000);
+    return () => clearTimeout(t);
+  }, [message]);
+
+  const toggle = async (flag: FeatureFlag) => {
+    const meta = FEATURE_META[flag];
+    const next = !flags[flag];
+    const ok = await confirm({
+      title: `${next ? '上架' : '下架'}「${meta.label}」`,
+      description: next ? meta.onConsequence : meta.offConsequence,
+      confirmText: next ? '确认上架' : '确认下架',
+    });
+    if (!ok) return;
+    setBusy(flag);
+    try {
+      const all = await api.patch<FeatureFlags>(`/admin/features/${flag}`, { enabled: next });
+      setFlags(all);
+      setMessage({ text: `「${meta.label}」已${next ? '上架' : '下架'}，5 秒内对所有用户生效`, ok: true });
+    } catch (e) {
+      setMessage({ text: e instanceof ApiError ? e.message : '操作失败', ok: false });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const rebuildAll = async () => {
+    const ok = await confirm({
+      title: '全量重建知识图谱',
+      description:
+        '将清空 Neo4j 中全部图谱数据（所有空间的实体、关系与索引）并重建 schema，然后对所有已就绪文档重新执行知识抽取与实体对齐。重建期间图谱功能不可用，LLM 与 Embedding 调用量较大；文档本身与检索索引不受影响，此操作不可撤销。',
+      confirmText: '确认全量重建',
+    });
+    if (!ok) return;
+    setBusy('rebuild');
+    try {
+      const r = await graphApi.rebuildAll();
+      setMessage({ text: `已清空 ${r.deletedNodes} 个节点，${r.documents} 篇文档排队重建，可在文档页查看进度`, ok: true });
+    } catch (e) {
+      setMessage({ text: e instanceof ApiError ? e.message : '重建失败', ok: false });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      {message && (
+        <div
+          className={`rounded-lg px-3 py-2 text-sm ${
+            message.ok ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400' : 'bg-red-500/10 text-red-600 dark:text-red-400'
+          }`}
+        >
+          {message.text}
+        </div>
+      )}
+
+      <section className="rounded-card border border-border bg-card p-5 shadow-card">
+        <h2 className="text-sm font-semibold text-ink-900">功能开关</h2>
+        <p className="mt-1 text-xs text-ink-400">运行时一键下架 / 上架，无需改代码或重启服务；服务端强制生效，前端入口随之隐藏。</p>
+        <div className="mt-4 divide-y divide-border">
+          {(Object.keys(FEATURE_META) as FeatureFlag[]).map((flag) => {
+            const meta = FEATURE_META[flag];
+            const on = flags[flag];
+            return (
+              <div key={flag} className="flex items-center gap-4 py-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-ink-900">{meta.label}</span>
+                    <code className="rounded bg-subtle px-1.5 py-px text-[11px] text-ink-400">{flag}</code>
+                    <span
+                      className={`rounded-full px-2 py-px text-[11px] ${
+                        on ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-subtle text-ink-400'
+                      }`}
+                    >
+                      {on ? '已上架' : '已下架'}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 text-xs text-ink-400">{meta.description}</p>
+                </div>
+                <button
+                  role="switch"
+                  aria-checked={on}
+                  disabled={busy === flag}
+                  onClick={() => void toggle(flag)}
+                  className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:opacity-50 ${
+                    on ? 'bg-brand-600' : 'bg-ink-300 dark:bg-ink-600'
+                  }`}
+                  title={on ? '点击下架' : '点击上架'}
+                >
+                  <span
+                    className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                      on ? 'translate-x-[22px]' : 'translate-x-0.5'
+                    }`}
+                  />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="rounded-card border border-red-500/20 bg-card p-5 shadow-card">
+        <h2 className="text-sm font-semibold text-ink-900">图谱维护</h2>
+        <p className="mt-1 text-xs text-ink-400">
+          清空 Neo4j 全部图谱并对所有已就绪文档重跑抽取与实体对齐。适用于 schema 升级、对齐阈值调整后的全量重建。
+        </p>
+        <div className="mt-4 flex items-center gap-3">
+          <button
+            onClick={() => void rebuildAll()}
+            disabled={busy === 'rebuild'}
+            className="rounded-lg bg-red-500 px-3.5 py-1.5 text-sm font-medium text-white transition-colors hover:bg-red-600 disabled:opacity-50"
+          >
+            {busy === 'rebuild' ? '提交中…' : '全量重建图谱'}
+          </button>
+          <span className="text-xs text-ink-400">单空间重建请在知识图谱页由空间所有者操作</span>
+        </div>
+      </section>
+
+      {confirmDialog}
     </div>
   );
 }

@@ -4,6 +4,7 @@ import { api } from '@/lib/api';
 import { runChatAgent } from '@/lib/agui';
 import { TtsPlayer } from '@/lib/tts';
 import { useAuthStore } from '@/store/auth';
+import { useFeaturesStore } from '@/store/features';
 import ConversationSidebar from '@/components/chat/ConversationSidebar';
 import MessageItem from '@/components/chat/MessageItem';
 import ChatInput from '@/components/chat/ChatInput';
@@ -15,6 +16,7 @@ import type { AgentStep, Conversation, Message } from '@/components/chat/types';
 const STAGE_TO_NODE: Record<string, string> = {
   router: 'complexity_router',
   retrieval: 'hybrid_retrieve',
+  graph: 'graph_reason',
 };
 
 function updateLastStep(steps: AgentStep[], pred: (s: AgentStep) => boolean, patch: Partial<AgentStep>): AgentStep[] {
@@ -32,6 +34,7 @@ export default function ChatPage() {
   const { conversationId } = useParams<{ conversationId: string }>();
   const navigate = useNavigate();
   const accessToken = useAuthStore((s) => s.accessToken);
+  const graphEnabled = useFeaturesStore((s) => s.flags.graph_reasoning);
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loadingConvs, setLoadingConvs] = useState(true);
@@ -216,6 +219,7 @@ export default function ChatPage() {
         accessToken: accessToken ?? '',
         threadId: conversationId,
         query,
+        enableGraph: graphEnabled,
         handlers: {
           onStepStart: (name) =>
             update((m) => ({
@@ -248,7 +252,7 @@ export default function ChatPage() {
             update((m) => ({ ...m, content: m.content + delta }));
           },
           onCitation: (c) => update((m) => ({ ...m, citations: [...(m.citations ?? []), c] })),
-          onGraphPath: (triples) => update((m) => ({ ...m, triples })),
+          onGraphPath: (p) => update((m) => ({ ...m, triples: p.triples, graph_subgraph: p.subgraph ?? null })),
           onUsage: (u) =>
             update((m) => ({
               ...m,

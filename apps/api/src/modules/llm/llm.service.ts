@@ -9,6 +9,19 @@ export interface ChatUsage {
   completion_tokens: number;
 }
 
+/** 单次调用可覆盖的模型参数：baseURL/apiKey 允许把某类任务路由到另一家模型服务 */
+export interface LlmCallOptions {
+  model?: string;
+  temperature?: number;
+  timeout?: number;
+  baseURL?: string;
+  apiKey?: string;
+  /** json_object：要求服务端强制输出合法 JSON（OpenAI 兼容 response_format） */
+  responseFormat?: 'json_object' | 'text';
+  /** 透传给服务端的额外请求体字段（如千问 enable_thinking） */
+  extraBody?: Record<string, unknown>;
+}
+
 /**
  * LLM 统一客户端：OpenAI 兼容协议，可接 DeepSeek / 通义 / OpenAI / Ollama。
  * 所有模型调用经此出口，便于熔断、脱敏与 LangFuse 追踪。
@@ -33,23 +46,37 @@ export class LlmService {
     });
   }
 
-  createChatModel(options?: { model?: string; temperature?: number; streaming?: boolean; timeout?: number }) {
+  createChatModel(options?: LlmCallOptions & { streaming?: boolean }) {
+    const modelKwargs: Record<string, unknown> = { ...options?.extraBody };
+    if (options?.responseFormat === 'json_object') {
+      modelKwargs.response_format = { type: 'json_object' };
+    }
     return new ChatOpenAI({
       model: options?.model ?? this.config.get<string>('llm.model') ?? 'deepseek-chat',
       temperature: options?.temperature ?? 0.1,
       streaming: options?.streaming ?? false,
-      apiKey: this.config.get<string>('llm.apiKey'),
-      configuration: { baseURL: this.config.get<string>('llm.baseURL') },
+      apiKey: options?.apiKey ?? this.config.get<string>('llm.apiKey'),
+      configuration: { baseURL: options?.baseURL ?? this.config.get<string>('llm.baseURL') },
       maxRetries: 2,
       timeout: options?.timeout ?? 60_000,
+      ...(Object.keys(modelKwargs).length > 0 ? { modelKwargs } : {}),
     });
   }
 
+  /**
+   * 内部轻量任务档位（复杂度路由、实体抽取）：走 LLM_ROUTER_MODEL。
+   * 千问 Qwen3 系列非流式调用必须关 thinking，否则服务端直接报错。
+   */
+  routerProfile(): Pick<LlmCallOptions, 'model' | 'extraBody'> {
+    const model = this.config.get<string>('llm.routerModel') ?? this.config.get<string>('llm.model');
+    return {
+      model,
+      extraBody: model?.startsWith('qwen') ? { enable_thinking: false } : undefined,
+    };
+  }
+
   /** 非流式调用：用于路由分类、实体抽取、查询改写等内部环节 */
-  async invoke(
-    messages: BaseMessage[],
-    options?: { model?: string; temperature?: number; timeout?: number },
-  ): Promise<string> {
+  async invoke(messages: BaseMessage[], options?: LlmCallOptions): Promise<string> {
     const { text } = await this.invokeWithUsage(messages, options);
     return text;
   }
@@ -57,7 +84,7 @@ export class LlmService {
   /** 非流式调用（含 token 用量）：供 LangFuse generation 埋点使用 */
   async invokeWithUsage(
     messages: BaseMessage[],
-    options?: { model?: string; temperature?: number; timeout?: number },
+    options?: LlmCallOptions,
   ): Promise<{ text: string; usage: ChatUsage }> {
     const model = this.createChatModel(options);
     const res = await model.invoke(this.maskMessages(messages));

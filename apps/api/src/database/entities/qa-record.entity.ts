@@ -6,7 +6,7 @@ import {
   ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
-import { Complexity, type Triple } from '@ekh/shared';
+import { Complexity, type GraphSubgraph, type Triple } from '@ekh/shared';
 import { MessageEntity } from './message.entity';
 
 /** 问答观测快照：召回分片、图谱链路、各节点耗时 */
@@ -30,6 +30,10 @@ export class QaRecordEntity {
 
   @Column({ name: 'graph_triples', type: 'jsonb', default: [] })
   graphTriples: Triple[];
+
+  /** 推理子图（带实体 id / 类型），历史消息回放推理拓扑用；未走图谱推理为 null */
+  @Column({ name: 'graph_subgraph', type: 'jsonb', nullable: true })
+  graphSubgraph: GraphSubgraph | null;
 
   @Column({ name: 'node_latencies', type: 'jsonb', default: {} })
   nodeLatencies: Record<string, number>;

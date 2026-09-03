@@ -161,3 +161,17 @@
 - **根因**：presign 时 `response-content-type` 只写了 `text/markdown` 没带 charset，浏览器对无 charset 的 text/* 按 Latin-1 解码 UTF-8 字节流
 - **修复**：`storage.service.ts` presignDownload 对 `text/*` 类型拼 `; charset=utf-8`；改完需 `pnpm --filter @ekh/api build` 并重启（API 跑 dist 产物，无热更新）
 - **相关**：`apps/api/src/modules/documents/storage.service.ts`、`scripts/dev-up.sh`
+
+## BullMQ jobId 去重：已完成任务在 removeOnComplete 保留窗口内，重入队被静默丢弃
+
+- **现象**：管理端「全量重建图谱」/ 文档 `reindex?from_stage=graph` 返回成功，文档状态置为 GRAPHING，但 worker 没有任何日志、队列 wait 长度不变，文档永久卡在 GRAPHING
+- **根因**：入库任务用 `jobId = ingest-<documentId>` 做并发去重，BullMQ 对已存在同 id 的任务（含 completed/failed 状态、尚未被 `removeOnComplete` 计数清掉的）直接忽略 `add`，不报错
+- **修复**：`ingestion.producer.ts#enqueue` 先 `queue.getJob(jobId)`：状态为 completed/failed/unknown 的旧任务先 `remove()` 再 add；active/waiting/delayed 的保留（维持去重语义）并跳过本次入队
+- **相关**：`apps/api/src/modules/ingestion/ingestion.producer.ts`
+
+## worker 关闭顺序：Redis/Neo4j 先断，BullMQ 还在等在途任务 → 任务报 Connection is closed
+
+- **现象**：`nest --watch` 热重载（或 SIGTERM）时旧进程要几分钟才退出，退出前在途任务全部 `graph rebuild degraded: Connection is closed.` / `Driver not Connected`，随后被 BullMQ 重试（attempts=3 用光就永久失败，文档卡在 GRAPHING）
+- **根因**：`enableShutdownHooks()` 下 Nest 先对所有模块跑 `onModuleDestroy`（RedisService `disconnect()`、GraphService 关 driver），`@nestjs/bullmq` WorkerHost 要到 `onApplicationShutdown` 才 `worker.close()` 等 active 任务跑完——任务是在连接已断的情况下继续跑的，必败；nest-cli 又要等旧进程退出才拉起新进程，所以既慢又丢任务
+- **修复**：`apps/worker/src/main.ts` 不再用 `enableShutdownHooks()`，自己监听 SIGTERM/SIGINT：先 `await processor.worker.close()`（停止取新任务并等 active 跑完），再 `app.close()` 释放连接。热重载仍要等在途任务结束（单篇 3~5 分钟），但任务不再失败；验证 worker 改动前先看 `LLEN bull:ingestion:active` 是否为 0
+- **相关**：`apps/worker/src/main.ts`、`apps/worker/src/processors/ingestion.processor.ts`、`apps/api/src/redis/redis.service.ts`

@@ -25,6 +25,7 @@ import { RedisService } from '../../redis/redis.service';
 import { ConfigService } from '@nestjs/config';
 import { BizException } from '../../common/filters/http-exception.filter';
 import { ErrorCode } from '@ekh/shared';
+import { FeatureFlagsService } from '../features/feature-flags.service';
 
 class ChatCompletionDto {
   @IsOptional()
@@ -76,6 +77,7 @@ export class ChatController {
     private readonly redis: RedisService,
     private readonly config: ConfigService,
     private readonly injection: PromptInjectionService,
+    private readonly features: FeatureFlagsService,
   ) {}
 
   /** 问答主接口：SSE 流式 */
@@ -124,6 +126,10 @@ export class ChatController {
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
     };
 
+    // 图谱推理：管理后台开关（服务端强制）∧ 调用方未显式关闭
+    const enableGraph =
+      (await this.features.isEnabled('graph_reasoning')) && (dto.options?.enable_graph ?? true);
+
     const t0 = Date.now();
     try {
       const { state: result, traceId } = await this.agent.run(
@@ -132,14 +138,13 @@ export class ChatController {
           userId: user.userId,
           conversationId: conv.id,
           workspaceId: dto.workspace_id ?? conv.workspaceId ?? undefined,
-          // 图谱推理已下线（多跳发散产生孤岛，暂不可用）：强制关闭，忽略调用方传值
-          enableGraph: false,
+          enableGraph,
         },
         {
           onStatus: (stage, detail) => send(SseEvent.STATUS, { stage, detail }),
           onToken: (delta) => send(SseEvent.TOKEN, { delta }),
           onCitation: (citation) => send(SseEvent.CITATION, citation),
-          onGraphPath: (triples) => send(SseEvent.GRAPH_PATH, { triples }),
+          onGraphPath: (payload) => send(SseEvent.GRAPH_PATH, payload),
         },
       );
 
@@ -155,6 +160,7 @@ export class ChatController {
         complexity: result.complexity ?? null,
         recalledChunkIds: result.rerankedChunks.map((c) => c.chunk_id),
         graphTriples: result.graphTriples,
+        graphSubgraph: result.graphSubgraph,
         nodeLatencies: result.nodeLatencies,
         degradedNodes: result.degraded,
         langfuseTraceId: traceId ?? undefined,

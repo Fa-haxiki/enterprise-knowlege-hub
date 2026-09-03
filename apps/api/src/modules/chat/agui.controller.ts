@@ -13,6 +13,7 @@ import { PromptInjectionService } from '../security/prompt-injection.service';
 import { RedisService } from '../../redis/redis.service';
 import { BizException } from '../../common/filters/http-exception.filter';
 import { ErrorCode } from '@ekh/shared';
+import { FeatureFlagsService } from '../features/feature-flags.service';
 
 class AguiMessageDto {
   @IsString()
@@ -75,6 +76,7 @@ export class AguiController {
     private readonly redis: RedisService,
     private readonly config: ConfigService,
     private readonly injection: PromptInjectionService,
+    private readonly features: FeatureFlagsService,
   ) {}
 
   @Post('chat')
@@ -133,6 +135,10 @@ export class AguiController {
       }
     };
 
+    // 图谱推理：管理后台开关（服务端强制）∧ 客户端未显式关闭
+    const enableGraph =
+      (await this.features.isEnabled('graph_reasoning')) && (dto.state?.enable_graph ?? true);
+
     const t0 = Date.now();
     try {
       send({ type: 'RUN_STARTED', threadId, runId });
@@ -143,8 +149,7 @@ export class AguiController {
           userId: user.userId,
           conversationId: conv.id,
           workspaceId: dto.state?.workspace_id ?? conv.workspaceId ?? undefined,
-          // 图谱推理已下线（多跳发散产生孤岛，暂不可用）：强制关闭，忽略调用方传值
-          enableGraph: false,
+          enableGraph,
         },
         {
           onStatus: (stage, detail) =>
@@ -157,7 +162,7 @@ export class AguiController {
             send({ type: 'TEXT_MESSAGE_CONTENT', messageId: streamMsgId, delta });
           },
           onCitation: (citation) => send({ type: 'CUSTOM', name: 'citation', value: citation }),
-          onGraphPath: (triples) => send({ type: 'CUSTOM', name: 'graph_path', value: { triples } }),
+          onGraphPath: (payload) => send({ type: 'CUSTOM', name: 'graph_path', value: payload }),
         },
       );
       if (textStarted) send({ type: 'TEXT_MESSAGE_END', messageId: streamMsgId });
@@ -180,6 +185,7 @@ export class AguiController {
         complexity: result.complexity ?? null,
         recalledChunkIds: result.rerankedChunks.map((c) => c.chunk_id),
         graphTriples: result.graphTriples,
+        graphSubgraph: result.graphSubgraph,
         nodeLatencies: result.nodeLatencies,
         degradedNodes: result.degraded,
         langfuseTraceId: traceId ?? undefined,

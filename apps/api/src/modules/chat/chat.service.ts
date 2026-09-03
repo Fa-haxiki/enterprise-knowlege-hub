@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { Complexity, ErrorCode, MessageRole, type Citation, type Triple } from '@ekh/shared';
+import { Complexity, ErrorCode, MessageRole, type Citation, type GraphSubgraph, type Triple } from '@ekh/shared';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { ConversationEntity } from '../../database/entities/conversation.entity';
 import { MessageEntity } from '../../database/entities/message.entity';
@@ -10,6 +10,7 @@ import { BizException } from '../../common/filters/http-exception.filter';
 import { MemoryService, type WindowMessage } from '../memory/memory.service';
 import { LlmService } from '../llm/llm.service';
 import { LangfuseService } from '../observability/langfuse.service';
+import { FeatureFlagsService } from '../features/feature-flags.service';
 
 @Injectable()
 export class ChatService {
@@ -23,6 +24,7 @@ export class ChatService {
     private readonly memory: MemoryService,
     private readonly llm: LlmService,
     private readonly langfuse: LangfuseService,
+    private readonly features: FeatureFlagsService,
   ) {}
 
   async getOrCreateConversation(userId: string, conversationId: string | undefined, workspaceId?: string) {
@@ -95,6 +97,7 @@ export class ChatService {
       complexity: Complexity | null;
       recalledChunkIds: string[];
       graphTriples: Triple[];
+      graphSubgraph?: GraphSubgraph | null;
       nodeLatencies: Record<string, number>;
       degradedNodes: string[];
       langfuseTraceId?: string;
@@ -106,6 +109,7 @@ export class ChatService {
         complexity: data.complexity,
         recalledChunkIds: data.recalledChunkIds,
         graphTriples: data.graphTriples,
+        graphSubgraph: data.graphSubgraph ?? null,
         nodeLatencies: data.nodeLatencies,
         degradedNodes: data.degradedNodes,
         langfuseTraceId: data.langfuseTraceId ?? null,
@@ -199,12 +203,15 @@ export class ChatService {
       ? await this.qaRecords.find({ where: { messageId: In(assistantIds) } })
       : [];
     const recordMap = new Map(records.map((r) => [r.messageId, r]));
+    // 图谱推理下架期间历史消息也不带推理链路，聊天面板自然不出现
+    const graphEnabled = await this.features.isEnabled('graph_reasoning');
 
     const enriched = items.map((m) => {
       const record = recordMap.get(m.id);
       return {
         ...m,
-        triples: record?.graphTriples ?? [],
+        triples: graphEnabled ? (record?.graphTriples ?? []) : [],
+        graph_subgraph: graphEnabled ? (record?.graphSubgraph ?? null) : null,
         complexity: record?.complexity ?? null,
         nodeLatencies: record?.nodeLatencies ?? null,
         degradedNodes: record?.degradedNodes ?? [],

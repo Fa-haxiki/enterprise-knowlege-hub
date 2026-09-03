@@ -83,3 +83,17 @@
 - **根因**：①系统代理启用时 mineru.net 直连被中间设备干扰（curl 读系统代理所以正常，Node fetch 默认直连）；②走代理后 undici keep-alive 复用的空闲隧道连接已被代理回收，复用即 ECONNRESET 或静默挂起
 - **修复**：最终方案是关掉系统代理走纯直连（用户网络环境 mineru.net/阿里云直连可达）；若必须走代理，需 `NODE_USE_ENV_PROXY=1` + 禁 keep-alive 的 dispatcher（`new Agent({keepAliveTimeout:1})`，且 undici 包版本须与 Node 内置 fetch 协议匹配，Node 24 用 undici@7，@8 会报 `UND_ERR_INVALID_ARG invalid onRequestStart`）
 - **相关**：`apps/worker/src/pipelines/mineru.client.ts` fetchWithCause（保留 cause 日志便于定位）
+
+## Neo4j 向量索引：score 不是余弦、属性要用 setNodeVectorProperty、过滤只能后置
+
+- **现象**：①对齐阈值按余弦 0.9 配置，`db.index.vector.queryNodes` 返回的 score 全在 0.8~1.0，几乎所有候选都「达标」；②直接 `SET n.embedding = $vec` 后向量索引查不到该节点；③想按 workspace/type 过滤候选，Cypher 里 `WHERE` 放在 CALL 后面 top-k 被吃掉
+- **根因**：①余弦相似度索引的 score 归一化为 `(1 + cos) / 2`；②JS 数组以 `LIST<FLOAT>` 存入的浮点精度/类型不一定满足索引要求，需 `db.create.setNodeVectorProperty`；③向量索引查询不支持前置过滤，只能超采后过滤
+- **修复**：`graph.service.ts#findSimilar` 先取 `GRAPH_ALIGN_VECTOR_K`（默认 50）个再 `WHERE node.workspace_id IN $wsIds AND node:Type` 后置过滤、`LIMIT topK`；相似度不信索引 score，用返回的 embedding 在本地重算精确余弦（无 embedding 时才用 `score * 2 - 1` 换算），阈值全部按余弦配置；写入统一 `CALL db.create.setNodeVectorProperty(n, 'embedding', row.embedding)`；driver 开 `disableLosslessIntegers: true` 避免 `count()` 返回 Integer 对象
+- **相关**：`apps/api/src/modules/graph/graph.service.ts`（ensureSchema / findSimilar / writeAlignedGraph）
+
+## Neo4j 同一 session 内 Promise.all 并发 run 结果错乱
+
+- **现象**：`stats` / `loadSubgraph` 里用 `Promise.all([session.run(a), session.run(b)])`，偶发结果对不上或报 `Session is already in use`
+- **根因**：neo4j-driver 的 Session 是单事务流，不支持并发查询；并发只能开多个 session
+- **修复**：同一 session 内改为顺序 `await`；确有并发需求时每个查询各开一个 session
+- **相关**：`apps/api/src/modules/graph/graph.service.ts`

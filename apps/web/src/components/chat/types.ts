@@ -1,6 +1,7 @@
-import type { AgentStep, Citation, Triple, UsageInfo } from '@/lib/agui';
+import type { AgentStep, Citation, GraphPathPayload, Triple, UsageInfo } from '@/lib/agui';
+import type { GraphSubgraph } from '@/lib/graph';
 
-export type { AgentStep, Citation, Triple, UsageInfo };
+export type { AgentStep, Citation, GraphPathPayload, Triple, UsageInfo };
 
 export interface Message {
   /** 渲染 key：流式期间为本地 tmp id，完成后保持不变，避免 React 重挂载闪烁 */
@@ -14,6 +15,8 @@ export interface Message {
   streaming?: boolean;
   steps?: AgentStep[];
   triples?: Triple[];
+  /** 图谱推理子图（流式由 graph_path 事件带出，历史由接口 graph_subgraph 字段带出） */
+  graph_subgraph?: GraphSubgraph | null;
   complexity?: 'simple' | 'complex' | null;
   /** 完成后由 usage 事件 / 历史接口带出：各节点耗时与降级节点（与消息实体一致的 camelCase） */
   nodeLatencies?: Record<string, number> | null;
@@ -35,6 +38,7 @@ export const STEP_LABELS: Record<string, string> = {
   query_rewrite: '问题改写',
   complexity_router: '复杂度判断',
   hybrid_retrieve: '混合检索',
+  graph_reason: '图谱推理',
   memory_load: '记忆加载',
   prompt_build: '构建提示词',
   llm_generate: '生成回答',
@@ -47,6 +51,7 @@ export const STEP_ORDER = [
   'query_rewrite',
   'complexity_router',
   'hybrid_retrieve',
+  'graph_reason',
   'memory_load',
   'prompt_build',
   'llm_generate',

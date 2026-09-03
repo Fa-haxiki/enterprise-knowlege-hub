@@ -327,9 +327,11 @@ export class DocumentsService {
     if (doc.status !== DocumentStatus.READY && doc.status !== DocumentStatus.FAILED) {
       throw new BizException(ErrorCode.DOC_STATUS_INVALID, '文档正在处理中，请稍后再试', 400);
     }
-    await this.transition(doc, DocumentStatus.INDEXING);
+    // 仅重建图谱不会重跑索引，状态直接进 GRAPHING 让文档页显示准确
+    const status = fromStage === 'graph' ? DocumentStatus.GRAPHING : DocumentStatus.INDEXING;
+    await this.transition(doc, status);
     await this.ingestion.enqueue({ documentId: doc.id, fromStage });
-    return { document_id: doc.id, status: DocumentStatus.INDEXING };
+    return { document_id: doc.id, status };
   }
 
   async remove(documentId: string) {

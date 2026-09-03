@@ -27,6 +27,8 @@ export const ErrorCode = {
   ACCOUNT_LOCKED: 40105,
   ACCOUNT_PENDING: 40106,
   ACCOUNT_REJECTED: 40107,
+  /** 功能已被管理员下架（运行时开关关闭） */
+  FEATURE_DISABLED: 40108,
 
   NOT_FOUND: 40401,
 

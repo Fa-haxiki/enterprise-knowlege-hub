@@ -11,8 +11,41 @@ export interface Citation {
   score?: number;
 }
 
-/** 图谱推理三元组 */
+/** 图谱推理三元组（实体规范名，供 Prompt 拼接与历史回放） */
 export type Triple = [string, string, string];
+
+/** 图谱实体类型（与 Neo4j 标签一致的封闭集合） */
+export type GraphEntityType = 'Project' | 'Supplier' | 'Person' | 'Policy' | 'Department';
+
+/** 图谱节点：id 为对齐后的稳定实体 id，name 为规范名 */
+export interface GraphNode {
+  id: string;
+  name: string;
+  type: GraphEntityType;
+  /** 出入度之和（overview / 邻居查询带出，供前端定节点大小） */
+  degree?: number;
+  aliases?: string[];
+  description?: string;
+  mention_count?: number;
+  /** 问答子图跨空间，节点带所属空间以便前端「在图谱中打开」 */
+  workspace_id?: string;
+}
+
+/** 图谱边：同一对实体的同类关系按溯源 chunk 聚合，weight = 支撑该关系的分片数 */
+export interface GraphEdge {
+  source: string;
+  target: string;
+  relation: string;
+  weight?: number;
+  confidence?: number;
+}
+
+export interface GraphSubgraph {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  /** 推理起点实体 id（问答子图中用于高亮） */
+  seeds?: string[];
+}
 
 /** SSE 事件类型 */
 export enum SseEvent {
@@ -57,6 +90,8 @@ export interface SseErrorPayload {
 
 export interface SseGraphPathPayload {
   triples: Triple[];
+  /** 带实体 id/类型的推理子图，供前端渲染拓扑并跳转图谱页 */
+  subgraph?: GraphSubgraph;
 }
 
 /** 问答请求体 */

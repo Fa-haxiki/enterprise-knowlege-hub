@@ -76,6 +76,22 @@ export default () => ({
     publicKey: process.env.LANGFUSE_PUBLIC_KEY ?? '',
     secretKey: process.env.LANGFUSE_SECRET_KEY ?? '',
   },
+  graph: {
+    // 对齐阈值均为余弦相似度（Neo4j 向量索引 score 会换算；findSimilar 本地重算精确余弦）
+    // ≥ auto：不看名称也合并（兜底中英文完全不同写法）；名称沾边时 ≥ merge 即合并
+    alignAutoCos: parseFloat(process.env.GRAPH_ALIGN_AUTO_COS ?? '0.90'),
+    alignMergeCos: parseFloat(process.env.GRAPH_ALIGN_MERGE_COS ?? '0.55'),
+    // 问答侧路由实体 → 图谱实体的最低相似度
+    queryAlignCos: parseFloat(process.env.GRAPH_QUERY_ALIGN_COS ?? '0.85'),
+    // 向量索引不支持预过滤：先取 vectorK 再按 workspace/type 过滤，保留 topK
+    alignVectorK: parseInt(process.env.GRAPH_ALIGN_VECTOR_K ?? '50', 10),
+    alignTopK: parseInt(process.env.GRAPH_ALIGN_TOP_K ?? '5', 10),
+  },
+  features: {
+    // 运行时开关的 env 默认值：Redis 中有值时以 Redis 为准（管理后台一键切换）
+    graphReasoning: process.env.GRAPH_REASONING_ENABLED !== 'false',
+    graphExplorer: process.env.GRAPH_EXPLORER_ENABLED !== 'false',
+  },
   rag: {
     chunkSize: parseInt(process.env.CHUNK_SIZE ?? '512', 10),
     chunkOverlap: parseInt(process.env.CHUNK_OVERLAP ?? '64', 10),

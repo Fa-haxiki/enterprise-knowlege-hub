@@ -125,6 +125,10 @@ export class AgentService {
       const t0 = Date.now();
       const timeout = NODE_TIMEOUTS[name];
       this.callbacksOf(config)?.onStepStart?.(name);
+      // 超时降级后原 Promise 仍在后台跑完，会迟到地推 status / graph_path（如「复杂问题，启用图谱推理」
+      // 出现在检索完成之后，而图谱节点实际未执行）；节点内回调经此闸门，降级后一律丢弃
+      let alive = true;
+      const nodeConfig = this.guardedConfig(config, () => alive);
       // llm_generate 使用 generation 埋点（含 token usage），不再重复建 span
       const span =
         name === 'llm_generate'
@@ -132,19 +136,34 @@ export class AgentService {
           : this.langfuse.createSpan(this.traceOf(config), name, this.spanInput(name, state));
       try {
         const result = timeout
-          ? await this.withTimeout(fn(state, config), timeout)
-          : await fn(state, config);
+          ? await this.withTimeout(fn(state, nodeConfig), timeout)
+          : await fn(state, nodeConfig);
         this.langfuse.endSpan(span, this.spanOutput(name, result));
         const latency = Date.now() - t0;
         this.callbacksOf(config)?.onStepEnd?.(name, latency, false);
         return { ...result, nodeLatencies: { [name]: latency } };
       } catch (e) {
+        alive = false;
         this.langfuse.endSpan(span, {}, e as Error);
         this.logger.warn(`node ${name} degraded: ${(e as Error).message}`);
         this.callbacksOf(config)?.onStepEnd?.(name, Date.now() - t0, true);
         return { degraded: [name], nodeLatencies: { [name]: Date.now() - t0 } };
       }
     };
+  }
+
+  /** 节点专用 config：回调加 alive 闸门，其余（trace 等）原样透传 */
+  private guardedConfig(config: RunnableConfig, alive: () => boolean): RunnableConfig {
+    const cb = this.callbacksOf(config);
+    if (!cb) return config;
+    const guarded: AgentCallbacks = {
+      ...cb,
+      onStatus: (stage, detail) => alive() && cb.onStatus(stage, detail),
+      onToken: (delta) => alive() && cb.onToken(delta),
+      onCitation: (c) => alive() && cb.onCitation(c),
+      onGraphPath: (p) => alive() && cb.onGraphPath(p),
+    };
+    return { ...config, configurable: { ...config.configurable, callbacks: guarded } };
   }
 
   private traceOf(config: RunnableConfig): TraceHandle | null {
@@ -185,6 +204,9 @@ export class AgentService {
       }));
     }
     if (result.graphTriples) out.graphTriples = result.graphTriples;
+    if (result.graphSubgraph) {
+      out.graphSubgraph = { nodes: result.graphSubgraph.nodes.length, edges: result.graphSubgraph.edges.length };
+    }
     if (result.longTermMemories) out.longTermMemories = result.longTermMemories;
     if (result.degraded) out.degraded = result.degraded;
     return out;
@@ -241,13 +263,13 @@ export class AgentService {
       ),
       new HumanMessage(`对话历史：\n${history}\n\n最新问题：${state.query}`),
     ];
-    const model = this.config.get<string>('llm.routerModel');
+    const profile = this.llm.routerProfile();
     const generation = this.langfuse.createGeneration(this.traceOf(config), {
       name: 'query_rewrite',
-      model: model ?? 'unknown',
+      model: profile.model ?? 'unknown',
       input: messages.map((m) => ({ role: m._getType(), content: String(m.content).slice(0, 2000) })),
     });
-    const { text, usage } = await this.llm.invokeWithUsage(messages, { model, temperature: 0 });
+    const { text, usage } = await this.llm.invokeWithUsage(messages, { ...profile, temperature: 0 });
     this.langfuse.endGeneration(generation, { output: text.slice(0, 2000), usage });
     return { rewrittenQuery: text.trim() || state.query };
   }
@@ -274,13 +296,13 @@ export class AgentService {
       ),
       new HumanMessage(state.rewrittenQuery),
     ];
-    const model = this.config.get<string>('llm.routerModel');
+    const profile = this.llm.routerProfile();
     const generation = this.langfuse.createGeneration(this.traceOf(config), {
       name: 'complexity_router',
-      model: model ?? 'unknown',
+      model: profile.model ?? 'unknown',
       input: messages.map((m) => ({ role: m._getType(), content: String(m.content).slice(0, 2000) })),
     });
-    const { text: raw, usage } = await this.llm.invokeWithUsage(messages, { model, temperature: 0 });
+    const { text: raw, usage } = await this.llm.invokeWithUsage(messages, { ...profile, temperature: 0 });
     this.langfuse.endGeneration(generation, { output: raw.slice(0, 2000), usage });
 
     try {
@@ -320,12 +342,17 @@ export class AgentService {
     return { rerankedChunks: chunks, degraded, nodeLatencies: latencies };
   }
 
-  /** step3+4: 图谱多跳推理 + 图增强检索（仅 complex 路径） */
+  /**
+   * step3+4: 图谱多跳推理 + 图增强检索（仅 complex 路径）。
+   * 起点：路由实体 → 对齐到图谱规范实体（精确 / 别名 / 向量）；对齐不到时兜底用 Top-3 召回分片提及的实体。
+   * 推理：沿问题意图相关的关系有向多跳，得到带实体 id 的子图（前端渲染）与去重 triples（Prompt 拼接）。
+   */
   private async graphReason(
     state: AgentState,
     config: RunnableConfig,
   ): Promise<Partial<AgentState>> {
-    if (state.routerEntities.length === 0) return { graphTriples: [] };
+    const empty = { graphTriples: [] as Triple[], graphSubgraph: null };
+    if (state.aclWhitelist.length === 0) return empty;
 
     // 路由实体类型强制白名单：LLM 输出会拼进 Cypher 标签，未校验可注入
     const entityTypeSet = new Set<string>(ENTITY_TYPES);
@@ -333,33 +360,48 @@ export class AgentService {
       (e): e is { name: string; type: EntityType } =>
         typeof e.name === 'string' && e.name.length > 0 && entityTypeSet.has(e.type),
     );
-    if (candidates.length === 0) return { graphTriples: [] };
 
-    const aligned = await this.graphDb.alignEntities(candidates, state.aclWhitelist);
-    if (aligned.length === 0) return { graphTriples: [] };
+    let seeds = candidates.length > 0 ? await this.graphDb.alignQueryEntities(candidates, state.aclWhitelist) : [];
+    if (seeds.length === 0) {
+      // 兜底：问题未点名实体（或写法对不上）时，用检索命中最靠前的分片所提及的实体作为起点
+      const topChunkIds = state.rerankedChunks.slice(0, 3).map((c) => c.chunk_id);
+      seeds = await this.graphDb.entitiesByChunkIds(topChunkIds, state.aclWhitelist, 3);
+    }
+    if (seeds.length === 0) {
+      this.callbacksOf(config)?.onStatus('graph', '未在图谱中找到相关实体');
+      return empty;
+    }
 
     const maxHops = this.config.get<number>('rag.graphMaxHops') ?? 3;
     // 仅沿问题意图相关的关系扩展（路由阶段判定），避免 GOVERNED_BY 等弱关系把图谱发散到不相关节点
-    const triples = await this.graphDb.multiHop(aligned, maxHops, state.aclWhitelist, state.routerRelations);
+    const { subgraph, triples } = await this.graphDb.multiHop(
+      seeds.map((s) => s.id),
+      maxHops,
+      state.aclWhitelist,
+      state.routerRelations,
+    );
+    // 起点本身也进子图：没有任何出边时前端仍能看到「对齐到了哪个实体」
+    for (const s of seeds) {
+      if (!subgraph.nodes.some((n) => n.id === s.id)) subgraph.nodes.push(s);
+    }
     this.callbacksOf(config)?.onStatus('graph', `图谱推理路径 ${triples.length} 条`);
-    if (triples.length > 0) this.callbacksOf(config)?.onGraphPath(triples);
+    if (subgraph.nodes.length > 0) this.callbacksOf(config)?.onGraphPath({ triples, subgraph });
 
     // 图增强检索：推理链路涉及的实体反查 MENTIONS 分片，合并进候选（去重，上限 topN+4）
-    const entityNames = [
-      ...new Set([...aligned.map((e) => e.name), ...triples.flatMap((t) => [t[0], t[2]])]),
-    ];
-    const chunkIds = await this.graphDb.chunksByEntities(entityNames, state.aclWhitelist, 8);
-    if (chunkIds.length === 0) return { graphTriples: triples };
+    const entityIds = subgraph.nodes.map((n) => n.id);
+    const chunkIds = await this.graphDb.chunksByEntityIds(entityIds, state.aclWhitelist, 8);
+    const base = { graphTriples: triples, graphSubgraph: subgraph };
+    if (chunkIds.length === 0) return base;
 
     const graphChunks = await this.retrieval.chunksByIds(chunkIds, state.aclWhitelist);
     const existing = new Set(state.rerankedChunks.map((c) => c.chunk_id));
     const appended = graphChunks.filter((c) => !existing.has(c.chunk_id));
-    if (appended.length === 0) return { graphTriples: triples };
+    if (appended.length === 0) return base;
 
     const topN = this.config.get<number>('rag.rerankTopN') ?? 6;
     this.callbacksOf(config)?.onStatus('graph', `图谱补充召回 ${appended.length} 条分片`);
     return {
-      graphTriples: triples,
+      ...base,
       rerankedChunks: [...state.rerankedChunks, ...appended].slice(0, topN + 4),
     };
   }

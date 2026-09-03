@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { api } from '@/lib/api';
 import DocPreviewModal, { type DocPreview } from '@/components/DocPreviewModal';
+import { useFeaturesStore } from '@/store/features';
 import ExecutionTrace from './ExecutionTrace';
+import GraphPathPanel from './GraphPathPanel';
 import MarkdownBody from './MarkdownBody';
 import type { Message } from './types';
 
@@ -63,6 +65,7 @@ function CitationPanel({ message }: { message: Message }) {
 
 export default function MessageItem({ message: m, playing, onFeedback, onSpeak }: Props) {
   const [copied, setCopied] = useState(false);
+  const graphEnabled = useFeaturesStore((s) => s.flags.graph_reasoning);
 
   const copyContent = async () => {
     try {
@@ -115,7 +118,8 @@ export default function MessageItem({ message: m, playing, onFeedback, onSpeak }
           <span className="ml-0.5 inline-block h-4 w-2 animate-blink bg-brand-600 align-text-bottom" />
         )}
 
-        {/* 图谱推理已下线，不再渲染图谱面板（含历史消息） */}
+        {/* 图谱推理链路：开关关闭时服务端已不下发，这里再兜一层避免缓存消息残留 */}
+        {graphEnabled && !m.streaming && <GraphPathPanel subgraph={m.graph_subgraph} triples={m.triples} />}
         <CitationPanel message={m} />
 
         {/* 操作栏：反馈 + 语音 */}

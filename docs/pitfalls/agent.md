@@ -64,3 +64,38 @@
 - **根因**：LLM 本身没有时间概念，system prompt 未注入当前时间，模型只能瞎编；服务器时区（macOS Asia/Shanghai、PG 时间戳链路）其实全部正确
 - **修复**：`agent.service.ts` 生成答案的 systemPrompt 注入 `当前时间：${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', ... })}`；显式指定 timeZone，避免部署到 UTC 服务器后回退成 UTC
 - **相关**：`apps/api/src/modules/agents/agent.service.ts`
+
+## 实体对齐：向量相似度分不开同指/非同指，需名称门控补召回
+
+- **现象**：全量重建后「星云ERP项目」与「星云ERP升级项目」（cos 0.722）、「天枢软件科技有限公司」与「天枢软件」（0.639）、「智能工厂项目」与「智能工厂一期项目」（0.707）都低于 LLM 门槛 0.75 被直接新建，成为孤岛；而非同指的「财务组织架构与职责手册 vs 主要财务制度」反而有 0.739
+- **根因**：对齐 embedding 文本是「名称（类型，又称别名）：描述」，不同文档对同一实体的描述差异会把同指对拉到 0.6~0.75，与非同指对重叠，任何固定余弦阈值都无法分离
+- **修复（后改为纯 embedding）**：同指对靠「名称沾边 + `GRAPH_ALIGN_MERGE_COS`（默认 0.55）」自动合并，中英文完全不同写法靠 `GRAPH_ALIGN_AUTO_COS`（0.90）兜底；不再交 LLM 判定。观测方法：worker DEBUG 日志 `align candidates X: Y@score`
+- **相关**：`apps/worker/src/pipelines/entity-aligner.ts#resolve`、`apps/api/src/modules/graph/entity-normalizer.ts`、`configuration.ts#graph.alignMergeCos`
+
+## 对齐 LLM 把「描述不同」当「矛盾」，全称/简称判为不同实体
+
+- **现象**：`align judge 天枢软件科技有限公司 ~ 天枢软件 (0.669): same=false conf=0.9 → KEEP`，明显的全称/简称对被小模型高置信判为不同
+- **根因**：两侧描述来自不同文档（一个「承接智能工厂数据中台」、一个「服务星云ERP升级项目」），提示词只写了「描述矛盾判不同、拿不准判不同」，模型把「服务的项目不同」泛化为业务矛盾
+- **修复**：`ALIGN_SYSTEM_PROMPT` 改为名称关系为首要依据，明确「描述是各文档的片面事实，不同≠矛盾（同一供应商服务多个项目是正常互补）」，并穷举什么算真正冲突（业务性质不同、同期职务冲突、明确标注不同期数/年份、制度主题不同）
+- **相关**：`apps/worker/src/pipelines/entity-aligner.ts#ALIGN_SYSTEM_PROMPT`
+
+## 抽取时注入的文档标题泄漏成实体/别名（编号、.pdf、《》、本办法）
+
+- **现象**：图谱出现 Policy「06-2025年度全面预算方案」「财务组织架构与职责手册」，别名里混入「《03-供应商付款审批制度.pdf》」「本办法(费用部分)」「财务部（主责）」，同一制度因编号前缀不同分裂成两个节点
+- **根因**：为解决分块后「本项目」指代不清，把 `《标题》> 章节路径` 前置进抽取输入，LLM 顺手把文件名当实体或别名输出；归一化只去装饰符号，不认识编号前缀和扩展名
+- **修复**：`entity-normalizer.ts` 新增 `cleanEntitySurface`（去成对书名号/引号、`03-` 编号前缀、文件扩展名、尾部短括注）并在 `normalizeEntityName` 前置调用；`entity-extractor.ts` 对 name/aliases/关系端点统一清洗，新增 `SELF_REFERENCE_RE`（本办法/该项目/上述供应商）噪声过滤，提示词声明标题仅用于消歧。清洗必须同时作用于关系端点，否则端点与实体名对不上、关系落空
+- **相关**：`apps/api/src/modules/graph/entity-normalizer.ts`、`apps/worker/src/pipelines/entity-extractor.ts`
+
+## 对齐 LLM 借用 Embedding 的百炼 Key 报 403 Free quota exhausted
+
+- **现象**：worker 对齐阶段 `align llm batch failed: 403 ... Free quota exhausted`，所有灰区实体对按「不同」处理，图谱重复节点激增
+- **根因**：`GRAPH_LLM_API_KEY` 未配时回退用了 `EMBEDDING_API_KEY` 调 `qwen-flash`，该 Key 只开通了 Embedding 免费额度，不含 LLM 对话额度
+- **修复**：`configuration.ts#graph.llm` 不再借用 Embedding Key；`LlmService.graphProfile()` 在未配 `GRAPH_LLM_API_KEY` 时回退主 LLM 的路由小模型（`LLM_ROUTER_MODEL`），独立百炼小模型改为可选覆盖（`.env.example` 注释说明）
+- **相关**：`apps/api/src/config/configuration.ts`、`apps/api/src/modules/llm/llm.service.ts#graphProfile`
+
+## LangGraph 节点超时降级后，原 Promise 迟到的回调仍推到前端
+
+- **现象**：路由节点 10s 超时降级（`degraded: ['complexity_router']`）后，SSE 仍收到 status「复杂问题，启用图谱推理」，且出现在「混合检索完成」之后，而 graph_reason 实际未执行、`complexity` 为 null，前端阶段提示自相矛盾
+- **根因**：`withTimeout` 用 `Promise.race` 只是放弃等待，节点内的 LLM 调用继续在后台完成并触发 `onStatus`；同理 graph_reason 超时后迟到的 `onGraphPath` 会渲染出答案没用到的子图
+- **修复**：`agent.service.ts#wrap` 给节点传 `guardedConfig`：回调（onStatus/onToken/onCitation/onGraphPath）套 `alive` 闸门，节点抛错/超时后置 `alive=false`，迟到回调一律丢弃
+- **相关**：`apps/api/src/modules/agents/agent.service.ts#wrap / guardedConfig`

@@ -25,6 +25,8 @@ import { AdminModule } from './modules/admin/admin.module';
 import { DepartmentsModule } from './modules/departments/departments.module';
 import { TtsModule } from './modules/tts/tts.module';
 import { HealthModule } from './modules/health/health.module';
+import { FeaturesModule } from './modules/features/features.module';
+import { GraphApiModule } from './modules/graph/graph-api.module';
 import { RedisModule } from './redis/redis.module';
 import { DatabaseInitService } from './database/database-init.service';
 import { DocumentChunkEntity } from './database/entities/document-chunk.entity';
@@ -86,6 +88,8 @@ import { IngestionJobEntity } from './database/entities/ingestion-job.entity';
     TtsModule,
     HealthModule,
     SecurityModule,
+    FeaturesModule,
+    GraphApiModule,
   ],
   providers: [
     DatabaseInitService,

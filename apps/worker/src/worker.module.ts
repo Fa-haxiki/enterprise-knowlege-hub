@@ -22,6 +22,7 @@ import { MineruClient } from './pipelines/mineru.client';
 import { TextParser } from './pipelines/text-parser';
 import { Chunker } from './pipelines/chunker';
 import { EntityExtractor } from './pipelines/entity-extractor';
+import { EntityAligner } from './pipelines/entity-aligner';
 
 @Module({
   imports: [
@@ -60,6 +61,6 @@ import { EntityExtractor } from './pipelines/entity-extractor';
     GraphModule,
     ObservabilityModule,
   ],
-  providers: [IngestionProcessor, MineruClient, TextParser, Chunker, EntityExtractor, StorageService],
+  providers: [IngestionProcessor, MineruClient, TextParser, Chunker, EntityExtractor, EntityAligner, StorageService],
 })
 export class WorkerModule {}

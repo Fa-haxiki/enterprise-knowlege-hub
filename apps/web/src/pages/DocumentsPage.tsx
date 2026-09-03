@@ -8,6 +8,8 @@ import DocTypeIcon from '@/components/DocTypeIcon';
 import Pagination from '@/components/Pagination';
 import { useConfirm } from '@/components/ConfirmDialog';
 import { useAuthStore } from '@/store/auth';
+import { useFeaturesStore } from '@/store/features';
+import { graphPageUrl } from '@/lib/graph';
 
 interface DocumentItem {
   id: string;
@@ -45,6 +47,7 @@ export default function DocumentsPage() {
   const { workspaceId } = useParams<{ workspaceId: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const user = useAuthStore((s) => s.user);
+  const graphExplorerEnabled = useFeaturesStore((s) => s.flags.graph_explorer);
   const [docs, setDocs] = useState<DocumentItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -399,6 +402,19 @@ export default function DocumentsPage() {
           <span className="ml-auto hidden text-xs text-ink-400 sm:block">
             上传后需部门审核，通过后自动解析入库
           </span>
+          {graphExplorerEnabled && workspaceId && (
+            <Link
+              to={graphPageUrl({ workspace: workspaceId })}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-xs font-medium text-ink-600 transition-colors hover:border-brand-500/40 hover:text-brand-600"
+              title="查看本空间的知识图谱"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="5" cy="6" r="2.5" /><circle cx="19" cy="6" r="2.5" /><circle cx="12" cy="18" r="2.5" />
+                <path d="M7 7.5 10.5 16M17 7.5 13.5 16M7.5 6h9" />
+              </svg>
+              查看图谱
+            </Link>
+          )}
         </nav>
         {error && (
           <p className="mb-4 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">

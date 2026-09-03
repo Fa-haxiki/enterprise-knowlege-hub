@@ -7,6 +7,7 @@ import ChatPage from '@/pages/ChatPage';
 import AdminPage from '@/pages/AdminPage';
 import SearchPage from '@/pages/SearchPage';
 import DepartmentPage from '@/pages/DepartmentPage';
+import GraphPage from '@/pages/GraphPage';
 import Layout from '@/components/Layout';
 
 function RequireAuth({ children }: { children: JSX.Element }) {
@@ -35,6 +36,8 @@ export default function App() {
         {/* 审核入口已并入知识空间文档页（?tab=review），旧链接重定向到待审优先视图 */}
         <Route path="review" element={<Navigate to="/workspaces?pending=1" replace />} />
         <Route path="search" element={<SearchPage />} />
+        {/* 知识图谱页：graph_explorer 开关关闭时页面内重定向回 /chat */}
+        <Route path="graph" element={<GraphPage />} />
         <Route path="department" element={<DepartmentPage />} />
         <Route path="admin" element={<AdminPage />} />
         <Route path="*" element={<Navigate to="/chat" replace />} />

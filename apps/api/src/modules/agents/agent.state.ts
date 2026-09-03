@@ -1,6 +1,6 @@
 import { Annotation } from '@langchain/langgraph';
 import type { BaseMessage } from '@langchain/core/messages';
-import type { ChunkHit, Citation, Complexity, Triple } from '@ekh/shared';
+import type { ChunkHit, Citation, Complexity, GraphSubgraph, SseGraphPathPayload, Triple } from '@ekh/shared';
 import type { WindowMessage } from '../memory/memory.service';
 
 /** LangGraph 全局状态：贯穿问答全链路 0-9 步 */
@@ -26,6 +26,8 @@ export const AgentStateAnnotation = Annotation.Root({
   routerRelations: Annotation<string[]>({ reducer: (_a, b) => b, default: () => [] }),
   rerankedChunks: Annotation<ChunkHit[]>({ reducer: (_a, b) => b, default: () => [] }),
   graphTriples: Annotation<Triple[]>({ reducer: (_a, b) => b, default: () => [] }),
+  /** 推理子图（带实体 id / 类型），供前端渲染拓扑并跳转图谱页；无推理结果为 null */
+  graphSubgraph: Annotation<GraphSubgraph | null>({ reducer: (_a, b) => b, default: () => null }),
   longTermMemories: Annotation<string[]>({ reducer: (_a, b) => b, default: () => [] }),
   /** prompt_build 组装的消息序列（节点间必须通过 state 传递，config 不可共享可变状态） */
   promptMessages: Annotation<BaseMessage[]>({ reducer: (_a, b) => b, default: () => [] }),
@@ -54,7 +56,7 @@ export interface AgentCallbacks {
   onStatus(stage: string, detail: string): void;
   onToken(delta: string): void;
   onCitation(citation: Citation): void;
-  onGraphPath(triples: Triple[]): void;
+  onGraphPath(payload: SseGraphPathPayload): void;
   /** 节点开始（AG-UI STEP_STARTED 映射用，可选） */
   onStepStart?(node: string): void;
   /** 节点结束：degraded 为 true 表示该节点超时降级（AG-UI STEP_FINISHED 映射用，可选） */

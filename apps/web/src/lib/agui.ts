@@ -1,5 +1,6 @@
 import { HttpAgent } from '@ag-ui/client';
 import { EventType } from '@ag-ui/core';
+import type { GraphSubgraph } from '@/lib/graph';
 
 export interface Citation {
   ref_id: number;
@@ -11,6 +12,12 @@ export interface Citation {
 }
 
 export type Triple = [string, string, string];
+
+/** graph_path CUSTOM 事件：推理链路三元组 + 可视化子图（按实体 id） */
+export interface GraphPathPayload {
+  triples: Triple[];
+  subgraph?: GraphSubgraph | null;
+}
 
 export interface AgentStep {
   name: string;
@@ -43,7 +50,7 @@ export interface AguiHandlers {
   onStatusDetail(stage: string, detail: string): void;
   onToken(delta: string): void;
   onCitation(c: Citation): void;
-  onGraphPath(triples: Triple[]): void;
+  onGraphPath(payload: GraphPathPayload): void;
   onUsage(u: UsageInfo): void;
   onFinished(result: RunResult): void;
   onError(message: string): void;
@@ -94,7 +101,10 @@ export async function runChatAgent(args: {
             break;
           case EventType.CUSTOM:
             if (e.name === 'citation') h.onCitation(e.value as Citation);
-            else if (e.name === 'graph_path') h.onGraphPath((e.value as { triples: Triple[] }).triples);
+            else if (e.name === 'graph_path') {
+              const v = e.value as GraphPathPayload;
+              h.onGraphPath({ triples: v?.triples ?? [], subgraph: v?.subgraph ?? null });
+            }
             else if (e.name === 'usage') h.onUsage(e.value as UsageInfo);
             else if (e.name === 'status_detail') {
               const v = e.value as { stage: string; detail: string };

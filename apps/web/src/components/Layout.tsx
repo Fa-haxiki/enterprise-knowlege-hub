@@ -3,6 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { api } from '@/lib/api';
 import { PENDING_REVIEW_CHANGED } from '@/lib/events';
 import { useAuthStore } from '@/store/auth';
+import { useFeaturesStore, type FeatureFlags } from '@/store/features';
 import { useThemeStore } from '@/store/theme';
 
 interface NavItem {
@@ -11,6 +12,8 @@ interface NavItem {
   icon: JSX.Element;
   /** 可见条件：sysadmin 仅系统管理员；deptAdmin 部门管理员或系统管理员 */
   visible?: (user: { role: string; is_dept_admin?: boolean }) => boolean;
+  /** 运行时功能开关：关闭时隐藏入口（服务端同时拒绝请求） */
+  feature?: keyof FeatureFlags;
 }
 
 const navItems: NavItem[] = [
@@ -44,6 +47,19 @@ const navItems: NavItem[] = [
     ),
   },
   {
+    to: '/graph',
+    label: '知识图谱',
+    feature: 'graph_explorer',
+    icon: (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="5" cy="6" r="2.5" />
+        <circle cx="19" cy="6" r="2.5" />
+        <circle cx="12" cy="18" r="2.5" />
+        <path d="M7 7.5 10.5 16M17 7.5 13.5 16M7.5 6h9" />
+      </svg>
+    ),
+  },
+  {
     to: '/department',
     label: '我的部门',
     visible: (u) => u.role !== 'sysadmin' && !!u.is_dept_admin,
@@ -69,11 +85,23 @@ const navItems: NavItem[] = [
 export default function Layout() {
   const { user, clear } = useAuthStore();
   const { theme, toggle } = useThemeStore();
+  const flags = useFeaturesStore((s) => s.flags);
+  const fetchFeatures = useFeaturesStore((s) => s.fetch);
   const navigate = useNavigate();
   const location = useLocation();
   const [pendingReviewCount, setPendingReviewCount] = useState(0);
 
   const canReview = !!user && (user.role === 'sysadmin' || !!user.is_dept_admin);
+
+  // 功能开关：挂载时拉取；切回标签页时刷新，管理端下架后无需重新登录即可生效
+  useEffect(() => {
+    void fetchFeatures();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void fetchFeatures();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [fetchFeatures]);
 
   // 待审核角标：挂载/路由变化时刷新；浏览器切回本标签页时再刷新一次（不轮询）；
   // 上传/审核操作通过自定义事件主动通知刷新
@@ -105,7 +133,9 @@ export default function Layout() {
     navigate('/login');
   };
 
-  const visibleItems = navItems.filter((item) => !item.visible || (user && item.visible(user)));
+  const visibleItems = navItems.filter(
+    (item) => (!item.visible || (user && item.visible(user))) && (!item.feature || flags[item.feature]),
+  );
 
   return (
     <div className="flex h-screen">
