@@ -29,6 +29,6 @@ export class DepartmentAdminEntity {
   @Column({ name: 'granted_by', type: 'uuid', nullable: true })
   grantedBy: string | null;
 
-  @CreateDateColumn({ name: 'granted_at' })
+  @CreateDateColumn({ name: 'granted_at', type: 'timestamptz' })
   grantedAt: Date;
 }

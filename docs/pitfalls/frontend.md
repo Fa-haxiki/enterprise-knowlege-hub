@@ -4,9 +4,16 @@
 
 - **现象**：批量审核通过多个文档后，文档列表页大量 `GET /documents/:id/progress` 并发，触发全局限流（120 次/分/IP）返回 429
 - **根因**：`setInterval` 里 `for` 循环对每个处理中文档逐个 `await api.get(.../progress)`，N 个文档 = 每 2s N 个请求
-- **修复**：后端加批量接口 `POST /documents/progress`（body `{ids[]}`，按 workspace 分组校验 ACL + Redis pipeline 批量取进度，一次往返）；前端改为单次批量请求，有文档离开处理中状态时刷新列表
+- **修复**：后端加批量接口 `POST /documents/progress`（body `{ids[]}`，按 workspace 分组校验 ACL + Redis pipeline 批量取进度，一次往返）；前端改为单次批量请求，并把返回的 `status` 立刻回写列表
 - **相关**：`apps/api/src/modules/documents/documents.controller.ts`、`documents.service.ts#batchProgress`、`apps/web/src/pages/DocumentsPage.tsx`
 - **教训**：列表页的轮询/刷新类请求，凡是「每行一次」的都要警惕 N 倍放大，优先改批量接口
+
+## 批量 progress 只更新百分比，部分文档 READY 后标签仍停在「解析中」
+
+- **现象**：`POST /documents/progress` 已返回某篇 `status=READY` / 其它篇 `GRAPHING`，列表三行仍显示「解析中」
+- **根因**：轮询只写了 `percent`，且仅当全部文档都离开处理中才 `load()` 刷新状态列；中间态（PARSING→GRAPHING）和「部分完成」都不回写 `docs`
+- **修复**：每次轮询用返回的 `status`/`error_msg` 就地 patch 列表；任一文档变为 READY/FAILED 再静默拉一次列表。订阅键用「仍在处理中的 id 集合」，避免 GRAPHING 回写重启定时器
+- **相关**：`apps/web/src/pages/DocumentsPage.tsx` 进度轮询 effect
 
 ## crypto.subtle 在 http 局域网 IP 下不可用（安全上下文限制）
 

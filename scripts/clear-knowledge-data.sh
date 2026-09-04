@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 清空知识库数据：PG 文档与分片、ES 索引、Neo4j 图谱、MinIO 原件。
-# 用途：切换 embedding 模型后旧向量不可复用，全部推倒重建。
+# 用途：切换 embedding / 图谱模型后旧数据不可复用，全部推倒重建。
+# 仅重建图谱：对 READY 文档 POST /documents/:id/reindex?from_stage=graph（会先清后建）。
 # 对话/消息/用户/部门等业务数据不受影响（消息中的历史引用将失效但记录保留）。
 set -euo pipefail
 cd "$(dirname "$0")/.."

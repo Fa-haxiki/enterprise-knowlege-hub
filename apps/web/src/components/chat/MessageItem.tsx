@@ -15,6 +15,35 @@ interface Props {
   onSpeak(m: Message): void;
 }
 
+function groupCitationsByDocument(citations: NonNullable<Message['citations']>) {
+  const byDoc = new Map<
+    string,
+    { document_id: string; title: string; pages: number[]; ref_ids: number[]; snippet: string }
+  >();
+  for (const c of citations) {
+    const g = byDoc.get(c.document_id);
+    if (!g) {
+      byDoc.set(c.document_id, {
+        document_id: c.document_id,
+        title: c.title,
+        pages: c.page != null ? [c.page] : [],
+        ref_ids: [c.ref_id],
+        snippet: c.snippet,
+      });
+      continue;
+    }
+    if (c.page != null && !g.pages.includes(c.page)) g.pages.push(c.page);
+    if (!g.ref_ids.includes(c.ref_id)) g.ref_ids.push(c.ref_id);
+  }
+  return [...byDoc.values()]
+    .map((g) => ({
+      ...g,
+      pages: g.pages.sort((a, b) => a - b),
+      ref_ids: g.ref_ids.sort((a, b) => a - b),
+    }))
+    .sort((a, b) => a.ref_ids[0] - b.ref_ids[0]);
+}
+
 function CitationPanel({ message }: { message: Message }) {
   const [preview, setPreview] = useState<DocPreview | null>(null);
 
@@ -28,26 +57,30 @@ function CitationPanel({ message }: { message: Message }) {
   };
 
   if (!message.citations?.length) return null;
+  const sources = groupCitationsByDocument(message.citations);
   return (
     <div className="mt-3 border-t border-border pt-2">
-      <div className="mb-1.5 text-xs font-medium text-ink-400">引用来源</div>
+      <div className="mb-1.5 text-xs font-medium text-ink-400">
+        引用来源
+        <span className="ml-1 font-normal">· {sources.length} 篇</span>
+      </div>
       <div className="flex flex-wrap gap-1">
-        {[...message.citations].sort((a, b) => a.ref_id - b.ref_id).map((c) => (
+        {sources.map((s) => (
           <button
-            key={c.ref_id}
-            onClick={() => void openDocument(c.document_id)}
-            className="group flex max-w-64 items-center gap-1.5 rounded-md border border-border bg-subtle/50 px-1.5 py-1 text-left text-xs transition-colors hover:border-brand-500/40 hover:bg-brand-600/5"
-            title={c.snippet}
+            key={s.document_id}
+            onClick={() => void openDocument(s.document_id)}
+            className="group flex max-w-72 items-center gap-1.5 rounded-md border border-border bg-subtle/50 px-1.5 py-1 text-left text-xs transition-colors hover:border-brand-500/40 hover:bg-brand-600/5"
+            title={s.snippet}
           >
             <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-brand-600/10 text-[10px] font-semibold text-brand-600">
-              {c.ref_id}
+              {s.ref_ids[0]}
             </span>
             <span className="truncate font-medium text-ink-600 group-hover:text-brand-700">
-              《{c.title}》
+              《{s.title}》
             </span>
-            {c.page != null && (
+            {s.pages.length > 0 && (
               <span className="shrink-0 rounded bg-subtle px-1 py-px text-[10px] text-ink-400">
-                P{c.page}
+                {s.pages.map((p) => `P${p}`).join(' · ')}
               </span>
             )}
             <svg

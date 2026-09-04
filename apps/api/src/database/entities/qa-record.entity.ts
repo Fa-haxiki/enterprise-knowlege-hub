@@ -40,6 +40,6 @@ export class QaRecordEntity {
   @Column({ name: 'langfuse_trace_id', type: 'varchar', length: 64, nullable: true })
   langfuseTraceId: string | null;
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
 }

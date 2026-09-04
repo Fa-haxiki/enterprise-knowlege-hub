@@ -29,6 +29,6 @@ export class WorkspaceMemberEntity {
   @Column({ type: 'varchar', length: 16 })
   role: WorkspaceRole;
 
-  @CreateDateColumn({ name: 'granted_at' })
+  @CreateDateColumn({ name: 'granted_at', type: 'timestamptz' })
   grantedAt: Date;
 }

@@ -3,6 +3,7 @@ import { useAuthStore } from '@/store/auth';
 import LoginPage from '@/pages/LoginPage';
 import WorkspacesPage from '@/pages/WorkspacesPage';
 import DocumentsPage from '@/pages/DocumentsPage';
+import GraphPage from '@/pages/GraphPage';
 import ChatPage from '@/pages/ChatPage';
 import AdminPage from '@/pages/AdminPage';
 import SearchPage from '@/pages/SearchPage';
@@ -32,6 +33,7 @@ export default function App() {
         <Route path="chat/:conversationId" element={<ChatPage />} />
         <Route path="workspaces" element={<WorkspacesPage />} />
         <Route path="workspaces/:workspaceId/documents" element={<DocumentsPage />} />
+        <Route path="workspaces/:workspaceId/graph" element={<GraphPage />} />
         {/* 审核入口已并入知识空间文档页（?tab=review），旧链接重定向到待审优先视图 */}
         <Route path="review" element={<Navigate to="/workspaces?pending=1" replace />} />
         <Route path="search" element={<SearchPage />} />

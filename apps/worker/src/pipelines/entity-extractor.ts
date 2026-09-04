@@ -1,16 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { LlmService } from '@ekh/api/modules/llm/llm.service';
-import { ENTITY_TYPES, type ExtractedEntity } from '@ekh/api/modules/graph/graph.service';
-
-export interface ExtractedRelation {
-  source: string;
-  sourceType: string;
-  target: string;
-  targetType: string;
-  relation: string;
-  confidence: number;
-}
+import type { ExtractedEntity, ExtractedRelation } from '@ekh/api/modules/graph/graph.service';
+import {
+  buildExtractionSystemPrompt,
+  normalizeEntityType,
+  normalizeRelationType,
+  type KgExtractionLlmOutput,
+} from './kg-extraction.schema';
 
 export interface ExtractionResult {
   entities: ExtractedEntity[];
@@ -18,53 +16,77 @@ export interface ExtractionResult {
   usage?: { prompt_tokens: number; completion_tokens: number };
 }
 
-const ENTITY_TYPE_SET = new Set<string>(ENTITY_TYPES);
-
-/** LLM 实体/关系抽取（JSON Schema 约束输出） */
+/** LLM 实体/关系抽取：标题+章节作上下文，类型归范，丢掉悬空关系 */
 @Injectable()
 export class EntityExtractor {
   private readonly logger = new Logger(EntityExtractor.name);
+  private readonly maxEntities: number;
+  private readonly maxRelations: number;
 
-  constructor(private readonly llm: LlmService) {}
+  constructor(
+    private readonly llm: LlmService,
+    config: ConfigService,
+  ) {
+    this.maxEntities = config.get<number>('kg.maxEntities') ?? 12;
+    this.maxRelations = config.get<number>('kg.maxRelations') ?? 15;
+  }
 
-  async extract(text: string): Promise<ExtractionResult> {
+  async extract(
+    text: string,
+    heading?: string | null,
+    documentTitle?: string,
+  ): Promise<ExtractionResult> {
+    if (!text?.trim()) return { entities: [], relations: [] };
+
     const { text: raw, usage } = await this.llm.invokeWithUsage(
       [
-        new SystemMessage(
-          '从文本中抽取企业知识图谱实体与关系。\n' +
-            `实体类型限于：${ENTITY_TYPES.join('/')}。\n` +
-            '实体名称统一使用中文规范名（如 Finance → 财务部、HR → 人力资源部）；' +
-            '仅当实体在原文中没有中文对应（如 ERP、OKR 等通用缩写）时保留原文；' +
-            '同一实体的中英文/全称简称等不同写法必须合并为同一个中文规范名。\n' +
-            '关系类型用大写下划线英文动词，如 USES_SUPPLIER / OWNED_BY / GOVERNED_BY / PUBLISHES / SERVES。\n' +
-            '只输出 JSON：{"entities":[{"name","type"}],"relations":[{"source","sourceType","target","targetType","relation","confidence"}]}。\n' +
-            'confidence 取 0-1；无内容可抽取时输出 {"entities":[],"relations":[]}。',
+        new SystemMessage(buildExtractionSystemPrompt(this.maxEntities, this.maxRelations)),
+        new HumanMessage(
+          `文档标题: ${documentTitle ?? '无'}\n章节: ${heading ?? '无'}\n\n内容:\n${text.slice(0, 4000)}`,
         ),
-        new HumanMessage(text.slice(0, 6000)),
       ],
-      { temperature: 0, timeout: 120_000 },
+      { temperature: 0.1, timeout: 120_000 },
     );
 
     try {
       const match = raw.match(/\{[\s\S]*\}/);
-      const parsed = JSON.parse(match ? match[0] : raw) as ExtractionResult;
-      return {
-        entities: (parsed.entities ?? []).filter(
-          (e): e is ExtractedEntity => ENTITY_TYPE_SET.has(e.type),
-        ),
-        relations: (parsed.relations ?? []).filter(
-          (r) =>
-            r.source &&
-            r.target &&
-            ENTITY_TYPE_SET.has(r.sourceType) &&
-            ENTITY_TYPE_SET.has(r.targetType) &&
-            /^[A-Z_]+$/.test(r.relation),
-        ),
-        usage,
-      };
+      const parsed = JSON.parse(match ? match[0] : raw) as KgExtractionLlmOutput;
+      return { ...this.toExtractionResult(parsed), usage };
     } catch (e) {
       this.logger.warn(`entity extraction parse failed: ${(e as Error).message}`);
       return { entities: [], relations: [], usage };
     }
+  }
+
+  private toExtractionResult(parsed: KgExtractionLlmOutput): ExtractionResult {
+    const entityNames = new Set<string>();
+    const entities: ExtractedEntity[] = [];
+    for (const e of (parsed.entities ?? []).slice(0, this.maxEntities)) {
+      const name = (e.name ?? '').trim();
+      const type = normalizeEntityType(e.type);
+      if (!name || !type) continue;
+      entityNames.add(name);
+      entities.push({
+        name,
+        type,
+        description: (e.description ?? '').trim(),
+        aliases: (e.aliases ?? []).map((a) => String(a).trim()).filter(Boolean),
+      });
+    }
+
+    const relations: ExtractedRelation[] = [];
+    for (const r of (parsed.relations ?? []).slice(0, this.maxRelations)) {
+      const source = (r.source ?? '').trim();
+      const target = (r.target ?? '').trim();
+      if (!source || !target || !entityNames.has(source) || !entityNames.has(target)) continue;
+      relations.push({
+        source,
+        target,
+        relation: normalizeRelationType(r.relation ?? r.type),
+        weight: typeof r.weight === 'number' ? r.weight : 0.5,
+      });
+    }
+
+    return { entities, relations };
   }
 }

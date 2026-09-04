@@ -48,7 +48,7 @@ flowchart TB
     routerNode -->|complex| retrieveNode
     retrieveNode --> fuseNode["rrf_fuse + rerank"]
     fuseNode --> graphCheck{"complex 且<br/>enable_graph?"}
-    graphCheck -->|是| graphNode["graph_reason<br/>实体抽取 + Neo4j 多跳"]
+    graphCheck -->|是| graphNode["graph_reason<br/>实体对齐 + 多跳 + 补召回"]
     graphCheck -->|否| aclFilterNode
     graphNode --> aclFilterNode["acl_filter<br/>分片级权限过滤"]
     aclFilterNode --> memoryNode["memory_load<br/>Redis 窗口 + Mem0"]
@@ -70,7 +70,7 @@ flowchart TB
 判断用户问题是否需要「多实体关联推理」。
 - simple：单一事实查询、制度条款、定义类。例："差旅住宿标准是多少"
 - complex：涉及 ≥2 个实体的关系/链路/对比/追溯。例："A项目的供应商还服务了哪些项目"
-只输出 {"complexity":"simple"|"complex","entities":["..."]}
+只输出 {"complexity":"simple"|"complex"}
 ```
 
 - 分类耗时预算 400ms；失败默认 `simple`
@@ -128,37 +128,33 @@ LIMIT 20;
 - 取 **Top-6** 进入上下文；得分 < 0.35 的分片丢弃
 - 若 Top-1 得分 < 0.3：判定「库内无相关内容」，走兜底话术（避免幻觉），并在 LangFuse 标记 `low_recall`
 
-## 3. 图谱多跳推理（graph_reason，仅 complex）
+## 3. 知识图谱（入库建图 + 空间浏览 + 问答多跳）
 
-### 3.1 实体抽取
+complex 且 `enable_graph` 时走 `graph_reason`：路由实体名对齐 `KnowledgeEntity`，沿 `RELATED_TO` 无向扩展 1–3 跳，triples 写入 Prompt 并推给前端；推理涉及的实体再反查 `MENTIONS` 分片补进召回。空间子页 `/workspaces/:workspaceId/graph` 仍用于浏览全图。
 
-LLM 从改写后的问题中抽取实体并对齐图内节点：
+### 3.1 图模型
 
 ```text
-从问题中抽取实体，类型限于 [Project, Supplier, Person, Policy, Department]。
-输出 JSON: [{"name":"A项目","type":"Project"},{"name":"华云科技","type":"Supplier"}]
+(KnowledgeDocument)-[:HAS_CHUNK]->(DocumentChunk)-[:MENTIONS]->(KnowledgeEntity)
+(KnowledgeEntity)-[:RELATED_TO {relation, weight}]->(KnowledgeEntity)
 ```
 
-入库抽取使用同一白名单（`entity-extractor.ts` 的 `ENTITY_TYPES`，白名单外类型丢弃）。这 5 类是 v1 封闭集合；扩展或改名须三处对齐并重跑图谱，见 [08-roadmap.md](./08-roadmap.md)「图谱实体类型演进」。
+- 实体 MERGE 键 `{name, workspace_id}`，不同空间同名实体不共享
+- 实体类型、关系语义见 [03-database-design.md](03-database-design.md) §3 与 [08-roadmap.md](./08-roadmap.md)
+- 查询只绑单个 `workspaceId`，由 `AclGuard` 校验空间权限
 
-抽取结果先与 Neo4j 做名称模糊匹配（`apoc.text.levenshteinSimilarity` ≥ 0.8）对齐到已有节点，避免「A项目 / A 项目」不匹配。
+### 3.2 空间图谱 API
 
-### 3.2 多跳查询
-
-- 以对齐后的实体为起点，执行参数化 Cypher（≤3 跳，LIMIT 30），见 [03-database-design.md](03-database-design.md) §3.3
-- 返回路径转为 triples：`[["A项目","USES_SUPPLIER","华云科技"],...]`
-- triples 同时：① 进入 Prompt 上下文 ② 经 SSE `graph_path` 推给前端绘制推理链路 ③ 落入 `qa_records.graph_triples`
-
-### 3.3 图谱结果与分片的互证
-
-Chunk 节点通过 `MENTIONS` 关系连接实体，因此可用图谱命中的实体反查关联分片，补充进候选（与 Rerank 结果去重合并），实现「图增强检索」。
+- `GET /api/v1/workspaces/:workspaceId/graph/nodes`
+- `GET /api/v1/workspaces/:workspaceId/graph/edges`
+- `GET /api/v1/workspaces/:workspaceId/graph/search`
 
 ## 4. 权限过滤（acl_filter）
 
 双重保障，缺一不可：
 
 1. **召回前置过滤**：ES `terms filter` + PGVector `workspace_id = ANY(...)`（已执行）
-2. **结果级过滤**：Rerank 后逐分片校验 `chunk.workspace_id ∈ aclWhitelist`，剔除越权分片；图谱 triples 关联的 `source_chunk` 同样校验
+2. **结果级过滤**：Rerank 后逐分片校验 `chunk.workspace_id ∈ aclWhitelist`，剔除越权分片
 
 > 设计原则：即使上游某一路忘记加过滤，结果级过滤兜底，越权内容绝不进入 Prompt。
 
@@ -243,11 +239,11 @@ A项目 --USES_SUPPLIER--> 华云科技 --SERVES--> B项目 --OWNED_BY--> 李四
 
 ### 8.3 实体抽取与建图
 
-- 按文档级批量抽取：LLM 输入 chunk 序列，输出 `entities[]` 与 `relations[]`（JSON Schema 约束）；实体 `type` 必须落在封闭白名单内
-- 写入 Neo4j：`MERGE` 实体（类型+标准化名称为唯一键），`CREATE` 关系并附 `{source_chunk_id, confidence}`
-- 同步建立 `(:Chunk {chunk_id})-[:MENTIONS]->(:Entity)` 用于图增强检索（§3.3）
-- confidence < 0.7 的关系进入待审核队列（P2 维护台处理）
-- 类型集合演进（如 `Supplier` → `Organization`、按需加 `Contract`）见 [08-roadmap.md](./08-roadmap.md)「图谱实体类型演进」，不在 v1 实现
+- 按 chunk 抽取：LLM 输入「文档标题 + 章节 heading + 正文」，输出 `entities[]` 与 `relations[]`；类型经 `normalizeEntityType` / `normalizeRelationType` 归范，未知实体丢弃、未知关系落 `RELATED_TO`；source/target 不在本块实体集合中的关系丢弃
+- 写入 Neo4j **先清后建**：`deleteForDocument` 再 MERGE `KnowledgeDocument` / `DocumentChunk` / `HAS_CHUNK` / `MENTIONS` / `RELATED_TO`
+- 实体按 `{name, workspace_id}` MERGE，RELATED_TO 两端必须同空间
+- 建图失败不阻断文档 READY（检索仍可用）
+- 存量重建：`POST /documents/:id/reindex?from_stage=graph`；换模型后可先清空 Neo4j（`scripts/clear-knowledge-data.sh` 或对 READY 文档批量 reindex）
 
 ## 9. LangFuse 埋点规范
 

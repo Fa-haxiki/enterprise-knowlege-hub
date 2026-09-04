@@ -8,25 +8,19 @@ import { forceCollide } from 'd3-force';
 import { useThemeStore } from '@/store/theme';
 import type { Triple } from './types';
 
-/** 关系类型英文 → 中文（LLM 抽取的自由动词，未命中时降级为原文小写分词） */
+/** 关系类型英文 → 中文（未命中时降级为原文小写分词） */
 const REL_ZH: Record<string, string> = {
-  PARTICIPATES_IN: '参与',
-  SUPPLIES_TO: '供应给',
-  SIGNED_WITH: '签约',
-  USES_SUPPLIER: '选用供应商',
-  OWNED_BY: '归属于',
-  GOVERNED_BY: '受约束于',
-  PUBLISHES: '发布',
-  SERVES: '服务于',
-  WORKS_FOR: '任职于',
   BELONGS_TO: '隶属于',
-  COOPERATES_WITH: '合作',
   MANAGES: '管理',
+  PARTICIPATES_IN: '参与',
   RESPONSIBLE_FOR: '负责',
-  INVOLVES: '涉及',
-  APPROVES: '审批',
+  DEPENDS_ON: '依赖',
+  RELATED_TO: '相关',
   MENTIONS: '提及',
 };
+
+export type GraphViewNode = { id: string; name: string; type?: string | null };
+export type GraphViewLink = { source: string; target: string; relation: string };
 
 function relLabel(rel: string): string {
   return REL_ZH[rel] ?? rel.toLowerCase().replace(/_/g, ' ');
@@ -79,8 +73,14 @@ function truncate(name: string, max = 8): string {
   return name.length > max ? `${name.slice(0, max)}…` : name;
 }
 
-/** 图谱推理链路可视化：力导向图，节点可拖拽，点击节点查看关联链路 */
-export default function GraphView({ triples }: { triples: Triple[] }) {
+/** 力导向图：聊天 triples 或空间图谱 {nodes, links}（含孤立节点） */
+export default function GraphView({
+  triples,
+  graph,
+}: {
+  triples?: Triple[];
+  graph?: { nodes: GraphViewNode[]; links: GraphViewLink[] };
+}) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const fgRef = useRef<ForceGraphMethods<NodeObject<GNode>, LinkObject<GNode, GLink>> | undefined>(
     undefined,
@@ -117,14 +117,22 @@ export default function GraphView({ triples }: { triples: Triple[] }) {
     fg.d3ReheatSimulation();
   }, [width, height]);
 
+  const tripleList: Triple[] = useMemo(() => {
+    if (graph) return graph.links.map((l) => [l.source, l.relation, l.target] as Triple);
+    return triples ?? [];
+  }, [graph, triples]);
+
   const { nodes, links } = useMemo(() => {
     const nodeMap = new Map<string, GNode>();
     const links: GLink[] = [];
     const seen = new Set<string>();
-    for (const [from, rel, to] of triples) {
-      // 防御性去重：相同三元组只保留一条
-      const dedupKey = `${from}
-el`;
+    if (graph) {
+      for (const n of graph.nodes) {
+        if (!nodeMap.has(n.id)) nodeMap.set(n.id, { id: n.name || n.id, degree: 0 });
+      }
+    }
+    for (const [from, rel, to] of tripleList) {
+      const dedupKey = `${from}|${rel}|${to}`;
       if (seen.has(dedupKey)) continue;
       seen.add(dedupKey);
       if (!nodeMap.has(from)) nodeMap.set(from, { id: from, degree: 0 });
@@ -142,13 +150,13 @@ el`;
       if (idx > 0) l.curvature = Math.ceil(idx / 2) * 0.22 * (idx % 2 === 0 ? 1 : -1);
     }
     return { nodes: [...nodeMap.values()], links };
-  }, [triples]);
+  }, [graph, tripleList]);
 
   /** 与选中节点关联的链路 */
   const related = useMemo(() => {
     if (!selected) return [];
-    return triples.filter((t) => t[0] === selected || t[2] === selected);
-  }, [triples, selected]);
+    return tripleList.filter((t) => t[0] === selected || t[2] === selected);
+  }, [tripleList, selected]);
 
   const isRelated = useCallback(
     (l: GLink) => {
@@ -260,7 +268,7 @@ el`;
   );
 
   // 右侧列表：未选中显示全部链路，选中后过滤为关联链路
-  const listed = selected ? related : triples;
+  const listed = selected ? related : tripleList;
 
   return (
     <div className="flex h-full w-full gap-3">

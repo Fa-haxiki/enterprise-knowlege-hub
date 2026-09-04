@@ -1,5 +1,13 @@
 # 数据库与 TypeORM 坑点
 
+## `timestamp` 无时区 + Docker UTC：列表时间比本地慢 8 小时
+
+- **现象**：本机 CST 09:50 上传，文档列表显示 `01:50`；PG 里 `created_at` 是 `01:50:19`，API 却返回 `2026-09-03T17:50:19.092Z`
+- **根因**：Docker/PG 会话时区是 UTC，`CreateDateColumn` 默认 `timestamp`（不带时区）写入的是 UTC 墙钟；node-pg 把无时区 timestamp 按 **Node 进程本地时区（CST）** 解析，再 `toISOString()` 又减 8 小时
+- **修复**：所有 `@CreateDateColumn` / `@UpdateDateColumn` 显式 `type: 'timestamptz'`；前端展示用 `toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })`
+- **相关**：`apps/api/src/database/entities/*.entity.ts`、`DocumentsPage.tsx`
+- **说明**：宿主机时间是对的，不必改 Docker 时钟；容器保持 UTC + 带时区列是常规做法
+
 ## TypeORM where 条件写 `field: undefined` 会被静默忽略
 
 - **现象**：软删文档仍出现在列表接口；再点删除时 `mustGet` 报 404「文档不存在」，前后表现矛盾

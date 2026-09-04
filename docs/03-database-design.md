@@ -253,47 +253,41 @@ CREATE INDEX idx_audit_time ON audit_logs(created_at DESC);
 
 ## 3. Neo4j 图模型
 
+图谱是**知识空间的子资源**：实体按 `{name, workspace_id}` MERGE，不同空间同名实体互不共享。前端只在 `/workspaces/:workspaceId/graph` 浏览该空间子图。
+
 ```mermaid
 flowchart LR
-    P1["(:Project {name, code})"] -->|"USES_SUPPLIER"| S1["(:Supplier {name, credit_code})"]
-    P1 -->|"OWNED_BY"| U1["(:Person {name, employee_id})"]
-    P1 -->|"GOVERNED_BY"| D1["(:Policy {title, doc_no})"]
-    C1["(:Chunk {chunk_id, document_id})"] -->|"MENTIONS"| P1
-    C1 -->|"MENTIONS"| S1
-    D2["(:Department {name})"] -->|"PUBLISHES"| D1
+    Doc["(:KnowledgeDocument)"] -->|"HAS_CHUNK"| Chunk["(:DocumentChunk)"]
+    Chunk -->|"MENTIONS"| Ent["(:KnowledgeEntity)"]
+    Ent -->|"RELATED_TO"| Ent
 ```
 
 ### 节点与关系规范
 
-| 标签 | 关键属性 | 来源 |
-| --- | --- | --- |
-| Project | name(唯一键), code, status | 实体抽取 |
-| Supplier | name(唯一键), credit_code | 实体抽取 |
-| Person | name, employee_id | 实体抽取 + HR 同步（可选） |
-| Policy | title, doc_no | 实体抽取 |
-| Department | name | 实体抽取 |
-| Chunk | chunk_id(唯一键), document_id | 入库时写入 |
+| 标签 | MERGE 键 | 主要属性 | 来源 |
+| --- | --- | --- | --- |
+| KnowledgeDocument | `{id}` | title, status, workspace_id | 入库建图 |
+| DocumentChunk | `{chunkId}`（PG `document_chunks.id`） | documentId, workspace_id, content, heading, chunkIndex | 入库建图 |
+| KnowledgeEntity | `{name, workspace_id}` | type, description, aliases | LLM 抽取 |
 
-以上 5 类实体为 **v1 封闭白名单**（对齐入库抽取与问答路由），不是跨行业标准清单。扩展、改名或把 `Supplier` 收成 `Organization` 见 [08-roadmap.md](./08-roadmap.md)「图谱实体类型演进」。
+- 实体类型（`type` 属性，不是 Neo4j 标签）：`PERSON / DEPARTMENT / PROJECT / COMPANY / PRODUCT / DOCUMENT`；无法归类的实体丢弃（不入库）
+- 实体间边统一为 `RELATED_TO`，语义类型在边属性 `relation`：`BELONGS_TO / MANAGES / PARTICIPATES_IN / RESPONSIBLE_FOR / DEPENDS_ON / RELATED_TO`，未知归 `RELATED_TO`
+- 查询一律 `workspace_id = $workspaceId`，不跨空间聚合
+- 单文档重建：先删该文档节点及其 chunk，再清理同空间无 MENTIONS 的孤儿实体
 
-- 实体对齐：以「类型 + 标准化名称」MERGE；名称标准化（去空格/全半角/大小写）后冲突交人工维护台（P2）
-- 关系属性：`{source_chunk_id, confidence, extracted_at}`，支持溯源
-
-### 多跳查询示例（参数化 Cypher）
+### 空间子图查询示例（参数化 Cypher）
 
 ```cypher
-// 「A 项目的供应商同时服务了哪些其他项目，负责人是谁」（≤3 跳）
-MATCH path = (p:Project {name: $project})-[:USES_SUPPLIER]->(s:Supplier)
-             <-[:USES_SUPPLIER]-(other:Project)-[:OWNED_BY]->(owner:Person)
-WHERE other <> p
-RETURN p.name AS project, s.name AS supplier,
-       other.name AS other_project, owner.name AS owner
-LIMIT 20;
+// 列出某空间实体
+MATCH (e:KnowledgeEntity {workspace_id: $workspaceId})
+WHERE $type IS NULL OR e.type = $type
+RETURN e.name, e.type, e.description
+LIMIT 200;
 
-// 通用多跳：以抽取实体为起点扩展
-MATCH path = (n)-*1..3-(m)
-WHERE n.name IN $entities AND n:$entityLabel
-RETURN path LIMIT 30;
+// 列出某空间关系
+MATCH (a:KnowledgeEntity {workspace_id: $workspaceId})-[r:RELATED_TO]->(b:KnowledgeEntity {workspace_id: $workspaceId})
+RETURN a.name, r.relation, b.name, r.weight
+LIMIT 500;
 ```
 
 ## 4. Elasticsearch 索引

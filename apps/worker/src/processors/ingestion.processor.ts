@@ -303,12 +303,16 @@ export class IngestionProcessor extends WorkerHost {
   }
 
   /**
-   * 实体抽取 + Neo4j 写入：
+   * 实体抽取 + Neo4j 先清后建：
    *   - 用共享 cursor 拉起 N 个 worker，4 路并发打 LLM（单 chunk 失败只跳过）
-   *   - 全部抽完后再按 chunk 顺序写图，避免并发 upsert 打乱关系
+   *   - 全部抽完后一次性 buildForDocument（内部先删旧图再写）
    *   - LLM 用量汇总成一条 Langfuse generation（失败也落埋点）
    */
-  private async buildGraph(doc: DocumentEntity, drafts: ChunkDraft[], trace?: TraceHandle | null) {
+  private async buildGraph(
+    doc: DocumentEntity,
+    drafts: Array<{ content: string; headingPath: string[] }>,
+    trace?: TraceHandle | null,
+  ) {
     const span = this.langfuse.createSpan(trace ?? null, 'graph', { chunks: drafts.length });
     const generation = this.langfuse.createGeneration(trace ?? null, {
       name: 'entity_extract',
@@ -316,16 +320,20 @@ export class IngestionProcessor extends WorkerHost {
       input: { chunks: drafts.length },
     });
     const saved = await this.chunks.find({ where: { documentId: doc.id }, order: { chunkIndex: 'ASC' } });
+    const sources =
+      drafts.length === saved.length
+        ? drafts
+        : saved.map((c) => ({ content: c.content, headingPath: c.headingPath }));
 
-    // 简易 worker pool：多个协程抢同一个 cursor，结果按原下标回填
-    const results: (ExtractionResult | null)[] = new Array(drafts.length).fill(null);
+    const results: (ExtractionResult | null)[] = new Array(saved.length).fill(null);
     let cursor = 0;
     let failedChunks = 0;
     const runWorker = async () => {
-      while (cursor < drafts.length) {
+      while (cursor < saved.length) {
         const i = cursor++;
+        const heading = sources[i]?.headingPath?.filter(Boolean).join(' > ') || null;
         try {
-          results[i] = await this.extractor.extract(drafts[i].content);
+          results[i] = await this.extractor.extract(sources[i].content, heading, doc.title);
         } catch (e) {
           failedChunks++;
           this.logger.warn(`chunk ${i} entity extract failed (skipped): ${(e as Error).message}`);
@@ -340,22 +348,29 @@ export class IngestionProcessor extends WorkerHost {
     try {
       await Promise.all(Array.from({ length: GRAPH_EXTRACT_CONCURRENCY }, () => runWorker()));
 
-      for (let i = 0; i < drafts.length; i++) {
+      const extractions = saved.map((chunk, i) => {
         const result = results[i];
-        if (!result) continue;
-        promptTokens += result.usage?.prompt_tokens ?? 0;
-        completionTokens += result.usage?.completion_tokens ?? 0;
-        if (result.entities.length === 0 && result.relations.length === 0) continue;
-        entities += result.entities.length;
-        relations += result.relations.length;
-        await this.graphDb.upsertGraph({
-          chunkId: saved[i].id,
-          documentId: doc.id,
-          workspaceId: doc.workspaceId,
-          entities: result.entities,
-          relations: result.relations,
-        });
-      }
+        if (result) {
+          promptTokens += result.usage?.prompt_tokens ?? 0;
+          completionTokens += result.usage?.completion_tokens ?? 0;
+          entities += result.entities.length;
+          relations += result.relations.length;
+        }
+        return {
+          chunkId: chunk.id,
+          content: chunk.content,
+          heading: sources[i]?.headingPath?.filter(Boolean).join(' > ') || null,
+          chunkIndex: chunk.chunkIndex,
+          totalChunks: saved.length,
+          entities: result?.entities ?? [],
+          relations: result?.relations ?? [],
+        };
+      });
+
+      await this.graphDb.buildForDocument(
+        { id: doc.id, title: doc.title, status: doc.status, workspaceId: doc.workspaceId },
+        extractions,
+      );
       this.langfuse.endGeneration(generation, {
         output: `entities=${entities} relations=${relations} failedChunks=${failedChunks}`,
         usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens },
@@ -371,22 +386,15 @@ export class IngestionProcessor extends WorkerHost {
     }
   }
 
-  /** 仅重建图谱：用已落库的分片重跑实体抽取（不清空索引，文档最终仍标 READY） */
+  /** 仅重建图谱：用已落库的分片重跑实体抽取（先清后建，文档最终仍标 READY） */
   private async rebuildGraphOnly(doc: DocumentEntity) {
     await this.transition(doc, DocumentStatus.GRAPHING, 85);
     try {
       const saved = await this.chunks.find({ where: { documentId: doc.id }, order: { chunkIndex: 'ASC' } });
-      for (const chunk of saved) {
-        const result = await this.extractor.extract(chunk.content);
-        if (result.entities.length === 0 && result.relations.length === 0) continue;
-        await this.graphDb.upsertGraph({
-          chunkId: chunk.id,
-          documentId: doc.id,
-          workspaceId: doc.workspaceId,
-          entities: result.entities,
-          relations: result.relations,
-        });
-      }
+      await this.buildGraph(
+        doc,
+        saved.map((c) => ({ content: c.content, headingPath: c.headingPath })),
+      );
       await this.trackJob(doc.id, IngestionStage.GRAPH, JobStatus.DONE);
       this.logger.log(`document ${doc.id} graph rebuilt: ${saved.length} chunks`);
     } catch (e) {
@@ -411,7 +419,7 @@ export class IngestionProcessor extends WorkerHost {
   private async purge(doc: DocumentEntity) {
     await this.chunks.delete({ documentId: doc.id });
     await this.es.deleteByDocument(doc.id);
-    await this.graphDb.deleteByDocument(doc.id).catch(() => undefined);
+    await this.graphDb.deleteForDocument(doc.id, doc.workspaceId).catch(() => undefined);
     await this.storage.remove(doc.fileKey);
     this.logger.log(`document ${doc.id} purged`);
   }

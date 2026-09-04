@@ -22,6 +22,7 @@ export const AgentStateAnnotation = Annotation.Root({
     reducer: (_a, b) => b,
     default: () => [],
   }),
+  routerRelations: Annotation<string[]>({ reducer: (_a, b) => b, default: () => [] }),
   rerankedChunks: Annotation<ChunkHit[]>({ reducer: (_a, b) => b, default: () => [] }),
   graphTriples: Annotation<Triple[]>({ reducer: (_a, b) => b, default: () => [] }),
   longTermMemories: Annotation<string[]>({ reducer: (_a, b) => b, default: () => [] }),
