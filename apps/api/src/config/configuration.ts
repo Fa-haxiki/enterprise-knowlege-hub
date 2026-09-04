@@ -29,6 +29,11 @@ export default () => ({
     uri: process.env.NEO4J_URI ?? 'bolt://localhost:7687',
     user: process.env.NEO4J_USER ?? 'neo4j',
     password: process.env.NEO4J_PASSWORD ?? 'neo4j',
+    enabled: process.env.NEO4J_ENABLED ?? 'true',
+  },
+  kg: {
+    maxEntities: parseInt(process.env.KG_MAX_ENTITIES ?? '12', 10),
+    maxRelations: parseInt(process.env.KG_MAX_RELATIONS ?? '15', 10),
   },
   minio: {
     endPoint: process.env.MINIO_ENDPOINT ?? 'localhost',

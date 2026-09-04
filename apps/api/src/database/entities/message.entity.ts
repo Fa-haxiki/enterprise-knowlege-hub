@@ -45,6 +45,6 @@ export class MessageEntity {
   @Column({ name: 'feedback_comment', type: 'text', nullable: true })
   feedbackComment: string | null;
 
-  @CreateDateColumn({ name: 'created_at' })
+  @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
 }

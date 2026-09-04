@@ -3,14 +3,16 @@ import { ConfigService } from '@nestjs/config';
 import { END, START, StateGraph } from '@langchain/langgraph';
 import type { RunnableConfig } from '@langchain/core/runnables';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
-import { Complexity, type Citation, type Triple } from '@ekh/shared';
+import { Complexity, type Citation, type ChunkHit, type Triple } from '@ekh/shared';
 import { AclService } from '../workspaces/acl.service';
 import { RetrievalService } from '../retrieval/retrieval.service';
 import { MemoryService } from '../memory/memory.service';
-import { ENTITY_TYPES, GraphService, type EntityType } from '../graph/graph.service';
 import { LlmService } from '../llm/llm.service';
 import { LangfuseService, type TraceHandle } from '../observability/langfuse.service';
+import { GRAPH_RELATION_TYPES, GraphService } from '../graph/graph.service';
 import { AgentStateAnnotation, type AgentCallbacks, type AgentState } from './agent.state';
+
+const RELATION_TYPE_SET = new Set<string>(GRAPH_RELATION_TYPES);
 
 const NODE_TIMEOUTS: Record<string, number> = {
   query_rewrite: 5_000,
@@ -29,8 +31,8 @@ export class AgentService {
     private readonly acl: AclService,
     private readonly retrieval: RetrievalService,
     private readonly memory: MemoryService,
-    private readonly graphDb: GraphService,
     private readonly llm: LlmService,
+    private readonly graphDb: GraphService,
     private readonly langfuse: LangfuseService,
     private readonly config: ConfigService,
   ) {
@@ -163,7 +165,7 @@ export class AgentService {
       case 'hybrid_retrieve':
         return { rewrittenQuery: state.rewrittenQuery, aclCount: state.aclWhitelist.length };
       case 'graph_reason':
-        return { entities: state.routerEntities };
+        return { entities: state.routerEntities, relations: state.routerRelations };
       case 'memory_load':
         return { conversationId: state.conversationId };
       default:
@@ -261,8 +263,16 @@ export class AgentService {
       new SystemMessage(
         '判断用户问题是否需要「多实体关联推理」。\n' +
           '- simple：单一事实查询、制度条款、定义类。例："差旅住宿标准是多少"\n' +
-          '- complex：涉及 ≥2 个实体的关系/链路/对比/追溯。例："A项目的供应商还服务了哪些项目"\n' +
-          '只输出 JSON：{"complexity":"simple"|"complex","entities":[{"name":"...","type":"Project|Supplier|Person|Policy|Department"}]}',
+          '- complex：涉及 ≥2 个实体的关系/链路/对比/追溯。例："华云科技参与了哪些项目"\n' +
+          '抽出问题中的实体（entities），类型仅从 PERSON/DEPARTMENT/PROJECT/COMPANY/PRODUCT/DOCUMENT 选。\n' +
+          '同时判断关系类型（relations），仅从以下集合选取（不相关不要选）：\n' +
+          '- BELONGS_TO：归属、隶属于\n' +
+          '- MANAGES：管理\n' +
+          '- PARTICIPATES_IN：参与项目\n' +
+          '- RESPONSIBLE_FOR：负责\n' +
+          '- DEPENDS_ON：依赖、使用供应商/产品\n' +
+          '- RELATED_TO：泛关联\n' +
+          '只输出 JSON：{"complexity":"simple"|"complex","entities":[{"name":"...","type":"COMPANY"}],"relations":["PARTICIPATES_IN"]}',
       ),
       new HumanMessage(state.rewrittenQuery),
     ];
@@ -279,17 +289,20 @@ export class AgentService {
       const parsed = JSON.parse(this.extractJson(raw)) as {
         complexity: Complexity;
         entities?: { name: string; type: string }[];
+        relations?: string[];
       };
       this.callbacksOf(config)?.onStatus(
         'router',
         parsed.complexity === Complexity.COMPLEX ? '复杂问题，启用图谱推理' : '简单问题，混合检索',
       );
+      const relations = (parsed.relations ?? []).filter((r) => typeof r === 'string' && RELATION_TYPE_SET.has(r));
       return {
         complexity: parsed.complexity === Complexity.COMPLEX ? Complexity.COMPLEX : Complexity.SIMPLE,
-        routerEntities: parsed.entities ?? [],
+        routerEntities: (parsed.entities ?? []).filter((e) => typeof e?.name === 'string' && e.name.trim()),
+        routerRelations: relations,
       };
     } catch {
-      return { complexity: Complexity.SIMPLE, routerEntities: [] };
+      return { complexity: Complexity.SIMPLE, routerEntities: [], routerRelations: [] };
     }
   }
 
@@ -306,34 +319,41 @@ export class AgentService {
     return { rerankedChunks: chunks, degraded, nodeLatencies: latencies };
   }
 
-  /** step3+4: 图谱多跳推理 + 图增强检索（仅 complex 路径） */
+  /**
+   * 图谱多跳 + 图增强补召回（仅 complex 且 enableGraph）。
+   * 起点：路由实体名对齐图谱；对不上则用 Top-3 召回分片提及的实体兜底。
+   */
   private async graphReason(
     state: AgentState,
     config: RunnableConfig,
   ): Promise<Partial<AgentState>> {
-    if (state.routerEntities.length === 0) return { graphTriples: [] };
+    const empty = { graphTriples: [] as Triple[] };
+    if (state.aclWhitelist.length === 0) return empty;
 
-    // 路由实体类型强制白名单：LLM 输出会拼进 Cypher 标签，未校验可注入
-    const entityTypeSet = new Set<string>(ENTITY_TYPES);
-    const candidates = state.routerEntities.filter(
-      (e): e is { name: string; type: EntityType } =>
-        typeof e.name === 'string' && e.name.length > 0 && entityTypeSet.has(e.type),
-    );
-    if (candidates.length === 0) return { graphTriples: [] };
-
-    const aligned = await this.graphDb.alignEntities(candidates, state.aclWhitelist);
-    if (aligned.length === 0) return { graphTriples: [] };
+    const candidates = state.routerEntities.map((e) => e.name.trim()).filter(Boolean);
+    let seeds =
+      candidates.length > 0 ? await this.graphDb.resolveEntityNames(candidates, state.aclWhitelist) : [];
+    if (seeds.length === 0) {
+      const topChunkIds = state.rerankedChunks.slice(0, 3).map((c) => c.chunk_id);
+      seeds = await this.graphDb.entityNamesByChunkIds(topChunkIds, state.aclWhitelist, 3);
+    }
+    if (seeds.length === 0) {
+      this.callbacksOf(config)?.onStatus('graph', '未在图谱中找到相关实体');
+      return empty;
+    }
 
     const maxHops = this.config.get<number>('rag.graphMaxHops') ?? 3;
-    const triples = await this.graphDb.multiHop(aligned, maxHops, state.aclWhitelist);
+    const { triples } = await this.graphDb.multiHop(
+      seeds,
+      maxHops,
+      state.aclWhitelist,
+      state.routerRelations,
+    );
     this.callbacksOf(config)?.onStatus('graph', `图谱推理路径 ${triples.length} 条`);
     if (triples.length > 0) this.callbacksOf(config)?.onGraphPath(triples);
 
-    // 图增强检索：推理链路涉及的实体反查 MENTIONS 分片，合并进候选（去重，上限 topN+4）
-    const entityNames = [
-      ...new Set([...aligned.map((e) => e.name), ...triples.flatMap((t) => [t[0], t[2]])]),
-    ];
-    const chunkIds = await this.graphDb.chunksByEntities(entityNames, state.aclWhitelist, 8);
+    const involved = [...new Set([...seeds, ...triples.flatMap((t) => [t[0], t[2]])])];
+    const chunkIds = await this.graphDb.chunkIdsByEntityNames(involved, state.aclWhitelist, 8);
     if (chunkIds.length === 0) return { graphTriples: triples };
 
     const graphChunks = await this.retrieval.chunksByIds(chunkIds, state.aclWhitelist);
@@ -378,9 +398,14 @@ export class AgentService {
     }
 
     if (state.rerankedChunks.length > 0) {
-      const refs = state.rerankedChunks
-        .map((c, i) => `[${i + 1}] 《${c.title}》${c.page ? `P${c.page}` : ''}：${c.content}`)
-        .join('\n');
+      const refs = this.groupChunksByDocument(state.rerankedChunks)
+        .map((g) => {
+          const excerpts = g.chunks
+            .map((c) => `${c.page ? `P${c.page}` : '摘录'}：${c.content}`)
+            .join('\n');
+          return `[${g.ref_id}] 《${g.title}》\n${excerpts}`;
+        })
+        .join('\n\n');
       sections.push(`## 参考资料\n${refs}`);
     }
 
@@ -403,7 +428,7 @@ export class AgentService {
     const systemPrompt =
       `你是企业知识库助手。当前时间：${now}（北京时间）。规则：\n` +
       '1. 仅依据「参考资料」与「知识图谱推理链路」回答，不得编造；\n' +
-      '2. 引用资料时用 [数字] 角标标注，与参考资料编号对应；\n' +
+      '2. 引用资料时用 [数字] 角标标注，与参考资料编号对应；同一篇文档全程只用同一个编号，不要按段落换号；\n' +
       '3. 资料不足时明确说明"根据现有资料无法确认"，并建议联系知识管理员；\n' +
       '4. 回答使用与用户相同的语言，条理清晰，复杂问题分点作答。';
 
@@ -442,22 +467,24 @@ export class AgentService {
     }
     this.langfuse.endGeneration(generation, { output: answer.slice(0, 2000), usage });
 
-    // 引用对齐：提取 [n] 角标 → citation
+    // 引用对齐：提取 [n] 角标 → 按文档分组的 citation（一篇文档一个号）
+    const groups = this.groupChunksByDocument(state.rerankedChunks);
     const citations: Citation[] = [];
     const usedRefs = new Set<number>();
     for (const match of answer.matchAll(/\[(\d+)\]/g)) {
       const refId = Number(match[1]);
-      const chunk = state.rerankedChunks[refId - 1];
-      if (chunk && !usedRefs.has(refId)) {
+      const group = groups.find((g) => g.ref_id === refId);
+      if (group && !usedRefs.has(refId)) {
         usedRefs.add(refId);
+        const primary = group.chunks[0];
         const citation: Citation = {
           ref_id: refId,
-          chunk_id: chunk.chunk_id,
-          document_id: chunk.document_id,
-          title: chunk.title,
-          page: chunk.page,
-          snippet: chunk.content.slice(0, 120),
-          score: chunk.rerank_score,
+          chunk_id: primary.chunk_id,
+          document_id: group.document_id,
+          title: group.title,
+          page: primary.page,
+          snippet: primary.content.slice(0, 120),
+          score: primary.rerank_score,
         };
         citations.push(citation);
         callbacks?.onCitation(citation);
@@ -465,6 +492,37 @@ export class AgentService {
     }
 
     return { answer, citations, usage };
+  }
+
+  /** 按文档首次出现顺序编号，供 Prompt 与引用对齐共用 */
+  private groupChunksByDocument(chunks: ChunkHit[]): Array<{
+    ref_id: number;
+    document_id: string;
+    title: string;
+    chunks: ChunkHit[];
+  }> {
+    const groups: Array<{
+      ref_id: number;
+      document_id: string;
+      title: string;
+      chunks: ChunkHit[];
+    }> = [];
+    const indexByDoc = new Map<string, number>();
+    for (const chunk of chunks) {
+      const existing = indexByDoc.get(chunk.document_id);
+      if (existing != null) {
+        groups[existing].chunks.push(chunk);
+        continue;
+      }
+      indexByDoc.set(chunk.document_id, groups.length);
+      groups.push({
+        ref_id: groups.length + 1,
+        document_id: chunk.document_id,
+        title: chunk.title,
+        chunks: [chunk],
+      });
+    }
+    return groups;
   }
 
   private extractJson(raw: string): string {

@@ -254,33 +254,48 @@ export default function DocumentsPage() {
     }
   };
 
-  // 处理中文档的进度轮询：单次批量请求获取所有进度，避免逐文档轮询触发限流（429）
+  // 处理中文档的进度轮询：单次批量请求；按仍在处理中的 id 集合订阅，避免中间状态回写重启定时器
+  const processingKey = docs
+    .filter((d) => PROCESSING.has(d.status))
+    .map((d) => d.id)
+    .sort()
+    .join(',');
+
   useEffect(() => {
-    const processing = docs.filter((d) => PROCESSING.has(d.status));
-    if (processing.length === 0) return;
+    const ids = processingKey ? processingKey.split(',') : [];
+    if (ids.length === 0) return;
     const timer = setInterval(async () => {
       try {
         const res = await api.post<{
-          items: { id: string; status: string; percent: number | null }[];
-        }>('/documents/progress', { ids: processing.map((d) => d.id) });
-        // 以服务端返回为准：统计仍处于处理中的数量，全部完成则停止轮询
-        // （不能依赖旧的 docs 快照，否则 load 异步刷新前会持续空轮询已 READY 的文档）
-        const stillProcessing = res.items.filter((it) => PROCESSING.has(it.status)).length;
+          items: { id: string; status: string; percent: number | null; error_msg?: string | null }[];
+        }>('/documents/progress', { ids });
         setProgress((prev) => {
           const next = { ...prev };
           for (const item of res.items) next[item.id] = item.percent ?? 0;
           return next;
         });
-        if (stillProcessing === 0) {
-          clearInterval(timer); // 全部完成：停止轮询
-          await load(page, true); // 刷新列表更新状态列
+        // 进度接口带权威 status：立刻回写列表，PARSING→GRAPHING→READY 不必等整页刷新
+        setDocs((prev) => {
+          const byId = new Map(res.items.map((it) => [it.id, it]));
+          let changed = false;
+          const next = prev.map((d) => {
+            const item = byId.get(d.id);
+            if (!item || item.status === d.status) return d;
+            changed = true;
+            return { ...d, status: item.status, error_msg: item.error_msg ?? d.error_msg };
+          });
+          return changed ? next : prev;
+        });
+        // 任一文档离开处理中（READY/FAILED）再静默拉一次列表，补齐 error_msg 等字段
+        if (res.items.some((it) => !PROCESSING.has(it.status))) {
+          await load(page, true);
         }
       } catch {
         /* 忽略单次轮询失败 */
       }
     }, 2000);
     return () => clearInterval(timer);
-  }, [docs]);
+  }, [processingKey, load, page]);
 
   const doUpload = async (file: File) => {
     if (!workspaceId || uploading) return;
@@ -396,6 +411,12 @@ export default function DocumentsPage() {
             <path d="m9 18 6-6-6-6" />
           </svg>
           <span className="truncate text-sm font-semibold text-ink-900">{wsName || '文档管理'}</span>
+          <Link
+            to={`/workspaces/${workspaceId}/graph`}
+            className="ml-2 shrink-0 rounded-lg px-2 py-1 text-xs font-medium text-brand-600 transition-colors hover:bg-brand-600/10"
+          >
+            知识图谱
+          </Link>
           <span className="ml-auto hidden text-xs text-ink-400 sm:block">
             上传后需部门审核，通过后自动解析入库
           </span>
@@ -675,7 +696,7 @@ export default function DocumentsPage() {
                         )}
                         <span>{formatSize(doc.file_size)}</span>
                         <span>·</span>
-                        <span>{new Date(doc.created_at).toLocaleString()}</span>
+                        <span>{new Date(doc.created_at).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}</span>
                         {doc.error_msg && <span className="truncate text-red-500">{doc.error_msg}</span>}
                         {doc.status === 'REJECTED' && doc.review_note && (
                           <span className="truncate text-red-500">拒绝理由：{doc.review_note}</span>

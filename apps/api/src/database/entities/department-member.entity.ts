@@ -29,6 +29,6 @@ export class DepartmentMemberEntity {
   @Column({ name: 'added_by', type: 'uuid', nullable: true })
   addedBy: string | null;
 
-  @CreateDateColumn({ name: 'added_at' })
+  @CreateDateColumn({ name: 'added_at', type: 'timestamptz' })
   addedAt: Date;
 }

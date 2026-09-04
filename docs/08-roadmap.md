@@ -96,40 +96,31 @@ gantt
 
 ## 图谱实体类型演进（P2）
 
-v1 图模型使用**封闭白名单**，不是业界通用清单。当前 5 类服务于 PRD 复杂问题「项目—供应商—负责人」以及制度/部门发文：
+当前图模型：统一标签 `KnowledgeEntity`，类型存在属性 `type`（不再把类型拼进 Cypher 标签）。封闭枚举：
 
-`Project` / `Supplier` / `Person` / `Policy` / `Department`
+`PERSON / DEPARTMENT / PROJECT / COMPANY / PRODUCT / DOCUMENT`
 
-金额、日期、文件名、条款编号**不进图**（作为分片属性或检索字段）。类型过宽会放大抽取噪声，且 Neo4j 标签在 `MERGE (n:${type})` 中不可参数化，必须走白名单。
+关系边类型固定 `RELATED_TO`，语义在属性 `relation`：
+
+`BELONGS_TO / MANAGES / PARTICIPATES_IN / RESPONSIBLE_FOR / DEPENDS_ON / RELATED_TO`
+
+图谱按**单个知识空间**隔离（`workspace_id`），不跨空间合并实体。浏览入口：`/workspaces/:workspaceId/graph`。
 
 ### 原则
 
-1. **先问后加**：只为真实存在的多跳问题加类型，不为「看起来企业级」加满。
-2. **角色用关系，不叠加标签**：供应商 / 客户 / 合作方优先作为 `Organization` 上的关系，而不是各建一类节点。
-3. **三处同时改、已入库文档重抽**：白名单、问答路由 prompt、TypeScript 联合类型必须对齐；改完后对存量文档 `reindex?from_stage=graph`。
-
-### 候选变更（按需，不默认全做）
-
-| 变更 | 动机 | 不做的情况 |
-| --- | --- | --- |
-| `Supplier` → `Organization` | 覆盖客户、子公司、合作方；角色用 `SUPPLIES` / `CUSTOMER_OF` 等关系表达 | 文档与问题仍以「供应商」为主 |
-| 保留并补齐 `Person` / `Department` | 身份层底座；可与 HR / 组织架构同步衔接 | — |
-| 新增 `Contract` | 合同甲乙方、有效期、关联项目的多跳 | 合同只当附件检索、不问关系 |
-| 新增 `Product` / `Asset` / `System` | 产品线、IT 资产、系统依赖 | 制度/项目型知识库 |
-| 新增 `Location` | 多园区、属地制度 | 单地点组织 |
-| 不把每份 PDF 建成 `Document` 节点 | 文档已在 PostgreSQL；图上 `Chunk -[:MENTIONS]-> 实体` 即可溯源 | — |
-
-跨行业更稳的**身份层底座**是 `Person` / `Organization` / `Department`；`Project`、`Policy` 属于工作对象，按领域保留或替换。
+1. **先问后加**：只为真实浏览/检索需求加类型，不为「看起来企业级」加满。
+2. **角色用关系，不叠加标签**：供应商 / 客户优先用 `DEPENDS_ON` / `BELONGS_TO` 等关系表达。
+3. **抽取与文档同时改、已入库文档重抽**：`kg-extraction.schema.ts` 枚举、prompt、前端类型筛选项必须对齐；改完后对存量文档 `reindex?from_stage=graph`。
 
 ### 实现清单（变更时必做）
 
 | 位置 | 做什么 |
 | --- | --- |
-| `apps/worker/src/pipelines/entity-extractor.ts` | `ENTITY_TYPES` + 抽取 prompt + 过滤 |
-| `apps/api/src/modules/graph/graph.service.ts` | `ExtractedEntity.type` 联合类型 |
-| `apps/api/src/modules/agents/agent.service.ts` | `complexity_router` prompt 中的类型枚举 |
+| `apps/worker/src/pipelines/kg-extraction.schema.ts` | 枚举 + prompt + normalize |
+| `apps/worker/src/pipelines/entity-extractor.ts` | 抽取后处理 |
+| `apps/web/src/pages/GraphPage.tsx` | 类型筛选项 |
 | `docs/03-database-design.md` §3 | 节点表与关系示例 |
-| `docs/05-rag-pipeline.md` §3.1 / §8.3 | 抽取约束说明 |
-| 存量数据 | `POST /documents/:id/reindex?from_stage=graph`；旧标签节点需迁移或重建图 |
+| `docs/05-rag-pipeline.md` §3 / §8.3 | 建图说明 |
+| 存量数据 | 清空 Neo4j 或 `POST /documents/:id/reindex?from_stage=graph` |
 
-验收：评估集中的复杂问题分类与多跳仍达标；抽到白名单外的类型继续丢弃；LangFuse `graph` span 可看到新类型实体数。
+验收：未知实体丢弃、未知关系归 `RELATED_TO`；不同空间同名实体仍是两个节点；空间 graph 页只显示本空间数据。
