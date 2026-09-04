@@ -25,10 +25,48 @@ export class EsService implements OnModuleInit {
     return this.index;
   }
 
+  private async hasIkPlugin(): Promise<boolean> {
+    try {
+      const plugins = (await this.client.cat.plugins({ format: 'json' })) as Array<{
+        component?: string;
+      }>;
+      return plugins.some((p) => p.component === 'analysis-ik');
+    } catch {
+      return false;
+    }
+  }
+
+  private async currentAnalyzer(field: string): Promise<string | null> {
+    try {
+      const mapping = await this.client.indices.getMapping({ index: this.index });
+      const props = (mapping[this.index] as { mappings?: { properties?: Record<string, { analyzer?: string }> } })
+        ?.mappings?.properties;
+      return props?.[field]?.analyzer ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   private async ensureIndex() {
     try {
+      const useIk = await this.hasIkPlugin();
+      if (!useIk) {
+        this.logger.warn('未检测到 analysis-ik 插件，索引仍用 standard（中文按字切）');
+      }
+
       const exists = await this.client.indices.exists({ index: this.index });
-      if (exists) return;
+      if (exists) {
+        const analyzer = await this.currentAnalyzer('content');
+        const want = useIk ? 'ik_max_word' : 'standard';
+        if (analyzer === want) return;
+        if (this.config.get<string>('app.nodeEnv') === 'production') {
+          this.logger.warn(`ES 索引分析器为 ${analyzer}，期望 ${want}；生产环境不自动重建，请手动删索引后回填`);
+          return;
+        }
+        await this.client.indices.delete({ index: this.index });
+        this.logger.warn(`已删除旧索引 ${this.index}（${analyzer} → ${want}），启动后需回填分片`);
+      }
+
       await this.client.indices.create({
         index: this.index,
         settings: { number_of_shards: 1, number_of_replicas: 0 },
@@ -38,15 +76,23 @@ export class EsService implements OnModuleInit {
             document_id: { type: 'keyword' },
             workspace_id: { type: 'keyword' },
             doc_type: { type: 'keyword' },
-            // ES 8 不支持 mapping 级 boost；标题加权在查询时 title^2 实现
-            title: { type: 'text', analyzer: 'standard' },
-            content: { type: 'text', analyzer: 'standard' },
+            // 索引细切、查询粗切；标题加权在查询时 title^2（ES 8 不支持 mapping boost）
+            title: {
+              type: 'text',
+              analyzer: useIk ? 'ik_max_word' : 'standard',
+              search_analyzer: useIk ? 'ik_smart' : 'standard',
+            },
+            content: {
+              type: 'text',
+              analyzer: useIk ? 'ik_max_word' : 'standard',
+              search_analyzer: useIk ? 'ik_smart' : 'standard',
+            },
             heading_path: { type: 'keyword' },
             created_at: { type: 'date' },
           },
         },
       });
-      this.logger.log(`ES index ${this.index} created`);
+      this.logger.log(`ES index ${this.index} created (analyzer=${useIk ? 'ik_max_word/ik_smart' : 'standard'})`);
     } catch (e) {
       // ES 未就绪不阻断启动；检索时按降级处理
       this.logger.warn(`ES ensureIndex failed (will degrade): ${(e as Error).message}`);

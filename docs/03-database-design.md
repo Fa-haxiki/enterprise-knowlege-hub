@@ -297,19 +297,14 @@ PUT kb_chunks
 {
   "settings": {
     "number_of_shards": 1,
-    "number_of_replicas": 0,
-    "analysis": {
-      "analyzer": {
-        "ik_smart_pinyin": { "type": "custom", "tokenizer": "ik_smart" }
-      }
-    }
+    "number_of_replicas": 0
   },
   "mappings": {
     "properties": {
       "chunk_id":     { "type": "keyword" },
       "document_id":  { "type": "keyword" },
       "workspace_id": { "type": "keyword" },
-      "title":        { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart", "boost": 2 },
+      "title":        { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
       "content":      { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
       "heading_path": { "type": "keyword" },
       "created_at":   { "type": "date" }

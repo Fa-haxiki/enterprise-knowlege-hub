@@ -7,6 +7,13 @@
 - **修复**：`scripts/dev-up.sh` 在启动 API **之前**自动 `ipconfig getifaddr en0/en1` 检测当前 LAN IP，与 .env 不一致则 `sed` 原地更新 `MINIO_PUBLIC_ENDPOINT`，实现换网络后重启即自动适配
 - **相关**：`scripts/dev-up.sh`、`.env`、`apps/api/src/modules/documents/storage.service.ts`（presignClient）
 
+## ES 换 IK 分词必须删索引重建，旧 mapping 改不了 analyzer
+
+- **现象**：代码改成 `ik_max_word` 后 `_analyze` 仍按字切开，或创建索引报 `analyzer [ik_max_word] not found`
+- **根因**：已有字段的 analyzer 不能改；IK 是插件，官方镜像默认没有
+- **修复**：`deploy/elasticsearch/Dockerfile` 预装 `analysis-ik` 8.15.0；非生产 `ensureIndex` 发现分析器不匹配会删索引重建。重建后需从 PG 回填分片（或 `reindex?from_stage=index`）
+- **相关**：`docker-compose.yml`、`apps/api/src/modules/retrieval/es.service.ts`
+
 ## ES fs 快照必须配置 path.repo 白名单
 
 - **现象**：注册快照仓库报 `location [/tmp/es-backup] doesn't match any of the locations specified by path.repo because this setting is empty`，且 `wait_for_completion` 不报错时快照静默为空

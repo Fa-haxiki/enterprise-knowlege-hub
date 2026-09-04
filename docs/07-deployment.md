@@ -72,14 +72,14 @@ services:
     volumes: ["redisdata:/data"]
 
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    build: { context: ./deploy/elasticsearch }
+    image: ekh-elasticsearch:8.15.0-ik
     environment:
       discovery.type: single-node
       xpack.security.enabled: "false"
       ES_JAVA_OPTS: -Xms2g -Xmx2g
     volumes: ["esdata:/usr/share/elasticsearch/data"]
-    # 首次启动后安装 IK 分词器：
-    # bin/elasticsearch-plugin install https://get.infini.cloud/elasticsearch/analysis-ik/8.15.0
+    # 镜像内已预装 analysis-ik 8.15.0；索引 ik_max_word / 查询 ik_smart
 
   neo4j:
     image: neo4j:5-community
