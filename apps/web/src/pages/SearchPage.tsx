@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import DocPreviewModal, { type DocPreview } from '@/components/DocPreviewModal';
 import DocTypeIcon from '@/components/DocTypeIcon';
@@ -17,6 +17,73 @@ interface ChunkHit {
 interface WorkspaceOption {
   id: string;
   name: string;
+}
+
+/**
+ * BM25 原始分无上限、不可直接读成「多相关」。
+ * 以本页最高段落分为 100%，其余按比例换算，命中项至少显示 1%。
+ */
+function relevancePercent(score: number, maxScore: number): number {
+  if (maxScore <= 0) return 0;
+  return Math.max(1, Math.round((score / maxScore) * 100));
+}
+
+/** 排名加权平均：第 k 段权重 1/k，综合整篇而不只取最高段，弱段也不会把分拉太低 */
+function rankWeightedScore(scores: number[]): number {
+  let num = 0;
+  let den = 0;
+  scores.forEach((s, i) => {
+    const w = 1 / (i + 1);
+    num += s * w;
+    den += w;
+  });
+  return den > 0 ? num / den : 0;
+}
+
+interface DocGroup {
+  document_id: string;
+  title: string;
+  title_highlights: string[];
+  combinedScore: number;
+  chunks: ChunkHit[];
+}
+
+/** 同一文档的分片收成一组，组内按相关度降序，文档按综合分排序 */
+function groupHitsByDocument(hits: ChunkHit[]): DocGroup[] {
+  const map = new Map<string, DocGroup>();
+  for (const hit of hits) {
+    const existing = map.get(hit.document_id);
+    if (!existing) {
+      map.set(hit.document_id, {
+        document_id: hit.document_id,
+        title: hit.title,
+        title_highlights: hit.title_highlights,
+        combinedScore: 0,
+        chunks: [hit],
+      });
+      continue;
+    }
+    existing.chunks.push(hit);
+    if (!existing.title_highlights.length && hit.title_highlights.length) {
+      existing.title_highlights = hit.title_highlights;
+    }
+  }
+  for (const g of map.values()) {
+    g.chunks.sort((a, b) => b.score - a.score);
+    g.combinedScore = rankWeightedScore(g.chunks.map((c) => c.score));
+  }
+  return [...map.values()].sort((a, b) => b.combinedScore - a.combinedScore);
+}
+
+const SCORE_COL = 'w-[4.75rem] shrink-0 text-right text-[10px] tabular-nums text-ink-300';
+const ACTION_COL = 'inline-flex w-3.5 shrink-0 items-center justify-center';
+
+function ScoreLabel({ percent, title }: { percent: number; title?: string }) {
+  return (
+    <span className={SCORE_COL} title={title}>
+      相关度 {percent}%
+    </span>
+  );
 }
 
 /**
@@ -105,9 +172,12 @@ export default function SearchPage() {
     setDateTo('');
   };
 
-  const openDocument = async (hit: ChunkHit) => {
+  const groups = useMemo(() => groupHitsByDocument(hits), [hits]);
+  const maxScore = hits[0]?.score ?? 0;
+
+  const openDocument = async (documentId: string) => {
     try {
-      const doc = await api.get<DocPreview>(`/documents/${hit.document_id}/download-url`);
+      const doc = await api.get<DocPreview>(`/documents/${documentId}/download-url`);
       setPreview(doc);
     } catch {
       /* 无权限或文档已删除时静默 */
@@ -224,48 +294,75 @@ export default function SearchPage() {
           )}
 
           {!searching && searched && hits.length > 0 && (
-            <p className="text-xs text-ink-400">共 {hits.length} 个命中分片</p>
+            <p className="text-xs text-ink-400">
+              共 {groups.length} 篇文档 · {hits.length} 个命中段落
+            </p>
           )}
 
           {!searching &&
-            hits.map((hit) => (
-              <button
-                key={hit.chunk_id}
-                onClick={() => void openDocument(hit)}
-                className="group w-full rounded-card border border-border bg-card px-4 py-3 text-left shadow-card transition-all hover:border-brand-500/40 hover:shadow-pop"
+            groups.map((group) => (
+              <div
+                key={group.document_id}
+                className="overflow-hidden rounded-card border border-border bg-card shadow-card"
               >
-                {/* 标题行：文档名 + 相关度 + 打开箭头（hover 出现） */}
-                <div className="flex items-center gap-2">
-                  <DocTypeIcon title={hit.title} size={16} className="shrink-0" />
-                  <span className="truncate text-sm font-medium text-ink-900 group-hover:text-brand-700">
-                    {hit.title_highlights.length > 0
-                      ? hit.title_highlights.map((t, i) => <HighlightedText key={i} text={t} />)
-                      : `《${hit.title}》`}
+                <button
+                  type="button"
+                  onClick={() => void openDocument(group.document_id)}
+                  className="group flex w-full items-center gap-2 px-4 py-3 text-left transition-colors hover:bg-subtle/60"
+                >
+                  <DocTypeIcon title={group.title} size={16} className="shrink-0" />
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-900 group-hover:text-brand-700">
+                    {group.title_highlights.length > 0
+                      ? group.title_highlights.map((t, i) => <HighlightedText key={i} text={t} />)
+                      : `《${group.title}》`}
                   </span>
-                  <span className="ml-auto shrink-0 text-[10px] tabular-nums text-ink-300">
-                    相关度 {hit.score.toFixed(1)}
-                  </span>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0 text-brand-600 opacity-0 transition-opacity group-hover:opacity-100">
-                    <path d="M7 17 17 7M8 7h9v9" />
-                  </svg>
-                </div>
-                {/* 章节路径 */}
-                {hit.heading_path.filter(Boolean).length > 0 && (
-                  <div className="mt-1 truncate pl-6 text-[11px] text-ink-400">
-                    {hit.heading_path.filter(Boolean).join(' / ')}
-                  </div>
-                )}
-                {/* 最佳命中片段（ES 按相关度排序，只取第一段，避免大段文字堆砌） */}
-                <p className="mt-1.5 line-clamp-3 pl-6 text-xs leading-6 text-ink-600">
-                  {hit.highlights.length > 0 ? (
-                    <>
-                                      …<HighlightedText text={hit.highlights[0]} />…
-                    </>
-                  ) : (
-                    <span className="text-ink-400">命中在文档标题</span>
+                  {group.chunks.length > 1 && (
+                    <span className="shrink-0 rounded-full bg-subtle px-1.5 py-0.5 text-[10px] text-ink-400">
+                      {group.chunks.length} 个段落
+                    </span>
                   )}
-                </p>
-              </button>
+                  <ScoreLabel
+                    percent={relevancePercent(group.combinedScore, maxScore)}
+                    title="各命中段落按相关度加权综合，不只取最高段"
+                  />
+                  <span className={ACTION_COL}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-brand-600 opacity-0 transition-opacity group-hover:opacity-100">
+                      <path d="M7 17 17 7M8 7h9v9" />
+                    </svg>
+                  </span>
+                </button>
+                <div className="border-t border-border/70">
+                  {group.chunks.map((hit) => {
+                    const heading = hit.heading_path.filter(Boolean).join(' / ');
+                    return (
+                      <button
+                        key={hit.chunk_id}
+                        type="button"
+                        onClick={() => void openDocument(hit.document_id)}
+                        className="flex w-full items-start gap-2 border-b border-border/50 px-4 py-2.5 text-left last:border-b-0 transition-colors hover:bg-subtle/50"
+                      >
+                        <span className="w-4 shrink-0" aria-hidden />
+                        <div className="min-w-0 flex-1">
+                          {heading ? (
+                            <div className="truncate text-[11px] text-ink-400">{heading}</div>
+                          ) : null}
+                          <p className="mt-0.5 line-clamp-3 text-xs leading-6 text-ink-600">
+                            {hit.highlights.length > 0 ? (
+                              <>
+                                …<HighlightedText text={hit.highlights[0]} />…
+                              </>
+                            ) : (
+                              <span className="text-ink-400">命中在文档标题</span>
+                            )}
+                          </p>
+                        </div>
+                        <ScoreLabel percent={relevancePercent(hit.score, maxScore)} />
+                        <span className={ACTION_COL} aria-hidden />
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
             ))}
         </div>
       </div>
