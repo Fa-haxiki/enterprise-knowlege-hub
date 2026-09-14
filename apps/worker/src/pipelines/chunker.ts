@@ -1,118 +1,151 @@
+import { randomUUID } from 'crypto';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { ParsedBlock } from './mineru.client';
 
+/** 中文粗略 1 token ≈ 1.5 字，配置按 token，比较时用字符。 */
+const TOKEN_CHAR_RATIO = 1.5;
+
+export type ChunkRole = 'parent' | 'child';
+
 /**
- * 尚未落库的分片草稿。index 阶段会把它写成 PG `document_chunks` + ES 文档。
+ * 父子分块草稿。index 阶段先落父块再落子块；仅子块做 embedding / ES。
  *
  * - content：纯正文（不含文档标题前缀；前缀只在向量化时由 enrichForEmbedding 拼接）
- * - headingPath：当前块所属标题栈，如 `['第二章', '2.1 范围']`，检索时可按章节过滤
- * - refs.page / bbox：溯源定位；段落只记起始页，表格额外带 bbox 方便前端高亮
+ * - headingPath：当前块所属标题栈，如 `['第二章', '2.1 范围']`
+ * - refs.page / bbox：溯源定位
+ * - draftId / parentDraftId：落库前的临时关联，写入后换成 UUID
  */
 export interface ChunkDraft {
+  role: ChunkRole;
+  draftId: string;
+  parentDraftId?: string;
   content: string;
   headingPath: string[];
   refs: { page?: number; bbox?: number[] };
 }
 
 /**
- * 语义分块：把 MinerU 的线性 blocks 收成检索友好的 chunks。
- *
- * 策略（按优先级）：
- *   1. 标题   只更新 headingPath，本身不进 chunk（避免「第二章」这种无内容块）
- *   2. 表格   整表单独成块，不与前后段落合并，也不按长度再切（拆开会丢掉行列结构）
- *   3. 图片   一期跳过（figure 无 OCR 正文，进向量库没有检索价值）
- *   4. 段落/公式  写入 buffer，凑到约 chunkSize 再按段落边界 flush
- *
- * 长度估算：配置项 CHUNK_SIZE / CHUNK_OVERLAP 按 token 计，
- * 中文粗略 1 token ≈ 1.5 字，所以比较时用 `chunkSize * 1.5` 字符。
- *
- * 例：blocks = [H1「薪资」, 段A, 段B(超长), 表1, H2「加班」, 段C]
- *   → chunk1: 段A（path=[薪资]）
- *   → chunk2: overlap(段A尾) + 段B（path=[薪资]）
- *   → chunk3: 表1 整表（path=[薪资]）
- *   → chunk4: 段C（path=[薪资, 加班]）
+ * 父子语义分块：
+ *   1. 标题   只更新 headingPath，本身不进父块
+ *   2. 表格   整表单独成父块，不与前后段落合并
+ *   3. 图片   跳过
+ *   4. 段落/公式  按标题节聚成父块；超 PARENT_CHUNK_SIZE 按段落再切，父块之间无 overlap
+ *   5. 每个父块内切子块（CHILD_CHUNK_SIZE + overlap）；短父块只产 1 个等长子块
  */
 @Injectable()
 export class Chunker {
   constructor(private readonly config: ConfigService) {}
 
   chunk(blocks: ParsedBlock[]): ChunkDraft[] {
-    const chunkSize = this.config.get<number>('rag.chunkSize') ?? 512;
-    const overlap = this.config.get<number>('rag.chunkOverlap') ?? 64;
-    const maxChars = chunkSize * 1.5;
-    const overlapChars = overlap * 1.5;
+    const parentMax = (this.config.get<number>('rag.parentChunkSize') ?? 1024) * TOKEN_CHAR_RATIO;
+    const childMax = (this.config.get<number>('rag.childChunkSize') ?? 256) * TOKEN_CHAR_RATIO;
+    const childOverlap = (this.config.get<number>('rag.childChunkOverlap') ?? 32) * TOKEN_CHAR_RATIO;
 
-    const chunks: ChunkDraft[] = [];
-    /** 标题栈：下标 0=H1、1=H2…；遇到同级或更高级标题时截断后半段 */
+    const out: ChunkDraft[] = [];
     let headingPath: string[] = [];
-    /** 正在累积的段落文本；遇到标题/表格/超长时 flush 成一块 */
-    let buffer = '';
-    /** buffer 里第一段的页码，作为该 chunk 的溯源页 */
-    let bufferPage: number | undefined;
+    let bufferParts: Array<{ text: string; page?: number }> = [];
 
-    /** 把 buffer 收成一块并清空。headingPath 用浅拷贝，避免后续改栈污染已产出的 chunk。 */
-    const flush = () => {
-      const text = buffer.trim();
-      if (text) {
-        chunks.push({ content: text, headingPath: [...headingPath], refs: { page: bufferPage } });
+    const emitParent = (content: string, path: string[], refs: ChunkDraft['refs']) => {
+      const text = content.trim();
+      if (!text) return;
+      const draftId = randomUUID();
+      out.push({ role: 'parent', draftId, content: text, headingPath: [...path], refs });
+      for (const child of this.splitChildren(text, childMax, childOverlap, refs)) {
+        out.push({
+          role: 'child',
+          draftId: randomUUID(),
+          parentDraftId: draftId,
+          content: child,
+          headingPath: [...path],
+          refs,
+        });
       }
-      buffer = '';
+    };
+
+    const flushBuffer = () => {
+      if (bufferParts.length === 0) return;
+      let acc = '';
+      let accPage: number | undefined;
+      const flushAcc = () => {
+        const t = acc.trim();
+        if (t) emitParent(t, headingPath, { page: accPage });
+        acc = '';
+        accPage = undefined;
+      };
+      for (const part of bufferParts) {
+        const candidate = acc ? `${acc}\n\n${part.text}` : part.text;
+        if (acc && candidate.length > parentMax) {
+          flushAcc();
+          acc = part.text;
+          accPage = part.page;
+        } else {
+          acc = candidate;
+          accPage = accPage ?? part.page;
+        }
+      }
+      flushAcc();
+      bufferParts = [];
     };
 
     for (const block of blocks) {
-      // —— 标题：先结算上文，再按 level 维护标题栈 ——
-      // H1「总则」→ H2「范围」→ 再遇 H1「附录」时 slice(0, 0) 丢掉「范围」，栈变成 [附录]
       if (block.type === 'heading') {
-        flush();
+        flushBuffer();
         const level = Math.min(Math.max(block.level ?? 1, 1), 6);
         headingPath = headingPath.slice(0, level - 1);
         headingPath[level - 1] = block.text.trim();
         continue;
       }
-
-      // —— 表格：独立成块，不进 buffer（避免被 overlap / 二次切分拆开） ——
       if (block.type === 'table') {
-        flush();
-        chunks.push({
-          content: block.text,
-          headingPath: [...headingPath],
-          refs: { page: block.page, bbox: block.bbox },
-        });
+        flushBuffer();
+        emitParent(block.text, headingPath, { page: block.page, bbox: block.bbox });
         continue;
       }
-
-      // —— 图片：无可用正文，一期不入检索库 ——
       if (block.type === 'figure') continue;
+      bufferParts.push({ text: block.text, page: block.page });
+    }
+    flushBuffer();
+    return out;
+  }
 
-      // —— 段落 / 公式：往 buffer 里攒，超长则按「已有段落」边界切开 ——
-      // 单个超长段落不会在句中切开：buffer 为空时 candidate 再长也整段收下
-      // （宁可一块偏长，也不把一段话拆成两截破坏语义）
-      bufferPage = bufferPage ?? block.page;
-      const candidate = buffer ? `${buffer}\n\n${block.text}` : block.text;
-      if (candidate.length > maxChars && buffer) {
-        // 必须先截 tail 再 flush：flush 会把 buffer 置空
+  /**
+   * 向量化前把章节路径拼到正文前面。
+   * 落库的 content 仍是裸正文，避免前端引用把前缀展示给用户。
+   */
+  enrichForEmbedding(docTitle: string, chunk: Pick<ChunkDraft, 'content' | 'headingPath'>): string {
+    const path = chunk.headingPath.join(' > ');
+    return path ? `${docTitle} > ${path}\n\n${chunk.content}` : `${docTitle}\n\n${chunk.content}`;
+  }
+
+  /** 父块内切子块；单段超长整段收下，不在句中切开。 */
+  private splitChildren(
+    content: string,
+    childMax: number,
+    overlapChars: number,
+    _refs: ChunkDraft['refs'],
+  ): string[] {
+    if (content.length <= childMax) return [content];
+
+    const paras = content.split(/\n\n/);
+    const children: string[] = [];
+    let buffer = '';
+
+    const flush = () => {
+      const text = buffer.trim();
+      if (text) children.push(text);
+    };
+
+    for (const para of paras) {
+      const candidate = buffer ? `${buffer}\n\n${para}` : para;
+      if (buffer && candidate.length > childMax) {
         const tail = buffer.slice(-overlapChars);
         flush();
-        // overlap：下一块以上一块尾部开头，检索时跨块问句仍能命中
-        buffer = tail ? `${tail}\n\n${block.text}` : block.text;
-        bufferPage = block.page;
+        buffer = tail ? `${tail}\n\n${para}` : para;
       } else {
         buffer = candidate;
       }
     }
     flush();
-    return chunks;
-  }
-
-  /**
-   * 向量化前把章节路径拼到正文前面。
-   * Embedding 只看这段字符串，检索「加班费怎么算」时，
-   * 带上「员工手册 > 薪资 > 加班」比裸正文更容易和问题对齐。
-   * 落库的 content 仍是裸正文，避免前端引用把前缀展示给用户。
-   */
-  enrichForEmbedding(docTitle: string, chunk: ChunkDraft): string {
-    const path = chunk.headingPath.join(' > ');
-    return path ? `${docTitle} > ${path}\n\n${chunk.content}` : `${docTitle}\n\n${chunk.content}`;
+    return children;
   }
 }

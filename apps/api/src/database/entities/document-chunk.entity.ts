@@ -31,6 +31,16 @@ export class DocumentChunkEntity {
   @Column({ name: 'chunk_index', type: 'int' })
   chunkIndex: number;
 
+  /** parent=生成上下文；child=检索单元 */
+  @Column({ type: 'varchar', length: 16, default: 'child' })
+  @Index()
+  role: 'parent' | 'child';
+
+  /** 子块指向父块；父块为 null */
+  @Column({ name: 'parent_id', type: 'uuid', nullable: true })
+  @Index()
+  parentId: string | null;
+
   @Column({ type: 'text' })
   content: string;
 

@@ -74,6 +74,9 @@ export class RetrievalService {
       reranked = withContent.slice(0, topN);
     }
 
+    // 子块精排后按 parent_id 去重，换成父块正文再进 prompt / 引用
+    reranked = await this.expandToParents(reranked);
+
     // ---- 结果级 ACL 兜底过滤 ----
     const allowed = new Set(aclWhitelist);
     const filtered = reranked.filter((c) => allowed.has(c.workspace_id));
@@ -178,6 +181,49 @@ export class RetrievalService {
       const fill = map.get(h.chunk_id);
       return fill ? { ...h, content: fill.content, page: fill.page, title: h.title || fill.title } : h;
     });
+  }
+
+  /**
+   * 精排后的子块 → 同一父块只留最高分命中，正文换成父块。
+   * 无 parent_id 的行（旧数据或短块自指）以自身为父。
+   */
+  private async expandToParents(hits: ChunkHit[]): Promise<ChunkHit[]> {
+    if (hits.length === 0) return [];
+    const rows = await this.dataSource.query(
+      `
+      SELECT c.id AS child_id,
+             COALESCE(c.parent_id, c.id) AS parent_id,
+             p.content AS parent_content,
+             p.heading_path AS parent_heading_path,
+             p.refs AS parent_refs,
+             p.document_id,
+             p.workspace_id
+      FROM document_chunks c
+      JOIN document_chunks p ON p.id = COALESCE(c.parent_id, c.id)
+      WHERE c.id = ANY($1)
+      `,
+      [hits.map((h) => h.chunk_id)],
+    );
+    const byChild = new Map<string, Record<string, unknown>>(
+      rows.map((r: Record<string, unknown>) => [r.child_id as string, r]),
+    );
+    const seen = new Set<string>();
+    const expanded: ChunkHit[] = [];
+    for (const hit of hits) {
+      const row = byChild.get(hit.chunk_id);
+      const parentId = (row?.parent_id as string | undefined) ?? hit.chunk_id;
+      if (seen.has(parentId)) continue;
+      seen.add(parentId);
+      const refs = (row?.parent_refs as { page?: number } | undefined) ?? {};
+      expanded.push({
+        ...hit,
+        chunk_id: parentId,
+        content: (row?.parent_content as string | undefined) ?? hit.content,
+        heading_path: (row?.parent_heading_path as string[] | undefined) ?? hit.heading_path,
+        page: refs.page ?? hit.page,
+      });
+    }
+    return expanded;
   }
 
   private async rerank(query: string, hits: ChunkHit[], topN: number, minScore: number): Promise<ChunkHit[]> {

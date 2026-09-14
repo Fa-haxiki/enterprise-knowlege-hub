@@ -107,7 +107,7 @@ flowchart TB
 flowchart LR
     Upload["分片上传<br/>MinIO 预签名 URL"] --> Enqueue["合并完成<br/>BullMQ 入队 ingestion"]
     Enqueue --> MinerUJob["MinerU 解析<br/>版面/表格/公式 → Markdown+结构元数据"]
-    MinerUJob --> Chunk["语义分块<br/>按标题层级切分<br/>chunk=512 token, overlap=64"]
+    MinerUJob --> Chunk["父子分块<br/>父块≤1024 token<br/>子块 256 token overlap=32"]
     Chunk --> EmbedW["Embedding bge-m3<br/>1024 维"]
     EmbedW --> DoubleWrite["双写<br/>PGVector(document_chunks)<br/>+ ES(kb_chunks)"]
     DoubleWrite --> EntityExt["LLM 实体/关系抽取<br/>项目/供应商/人员/制度..."]

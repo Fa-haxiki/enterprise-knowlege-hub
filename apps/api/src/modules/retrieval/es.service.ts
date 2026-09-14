@@ -56,6 +56,15 @@ export class EsService implements OnModuleInit {
 
       const exists = await this.client.indices.exists({ index: this.index });
       if (exists) {
+        const mapping = await this.client.indices.getMapping({ index: this.index });
+        const props = (mapping[this.index] as { mappings?: { properties?: Record<string, unknown> } })
+          ?.mappings?.properties;
+        if (!props?.parent_id) {
+          await this.client.indices.putMapping({
+            index: this.index,
+            properties: { parent_id: { type: 'keyword' } },
+          });
+        }
         const analyzer = await this.currentAnalyzer('content');
         const want = useIk ? 'ik_max_word' : 'standard';
         if (analyzer === want) return;
@@ -88,6 +97,7 @@ export class EsService implements OnModuleInit {
               search_analyzer: useIk ? 'ik_smart' : 'standard',
             },
             heading_path: { type: 'keyword' },
+            parent_id: { type: 'keyword' },
             created_at: { type: 'date' },
           },
         },
@@ -118,7 +128,7 @@ export class EsService implements OnModuleInit {
           filter: [{ terms: { workspace_id: workspaceIds } }],
         },
       },
-      _source: ['chunk_id', 'document_id', 'workspace_id', 'title', 'heading_path'],
+      _source: ['chunk_id', 'document_id', 'workspace_id', 'title', 'heading_path', 'parent_id'],
     });
     return res.hits.hits.map((h) => ({
       chunk_id: (h._source as Record<string, unknown>).chunk_id as string,
@@ -126,6 +136,7 @@ export class EsService implements OnModuleInit {
       workspace_id: (h._source as Record<string, unknown>).workspace_id as string,
       title: (h._source as Record<string, unknown>).title as string,
       heading_path: ((h._source as Record<string, unknown>).heading_path as string[]) ?? [],
+      parent_id: (h._source as Record<string, unknown>).parent_id as string | undefined,
       raw_score: h._score ?? 0,
     }));
   }
@@ -162,7 +173,7 @@ export class EsService implements OnModuleInit {
           filter,
         },
       },
-      _source: ['chunk_id', 'document_id', 'workspace_id', 'title', 'heading_path'],
+      _source: ['chunk_id', 'document_id', 'workspace_id', 'title', 'heading_path', 'parent_id'],
       highlight: {
         pre_tags: ['<em>'],
         post_tags: ['</em>'],
@@ -195,6 +206,7 @@ export class EsService implements OnModuleInit {
     title: string;
     content: string;
     heading_path: string[];
+    parent_id?: string | null;
   }) {
     await this.client.index({
       index: this.index,

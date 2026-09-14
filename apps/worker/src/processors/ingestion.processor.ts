@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -18,6 +19,7 @@ import { MineruClient, type MineruResult } from '../pipelines/mineru.client';
 import { TextParser } from '../pipelines/text-parser';
 import { Chunker, type ChunkDraft } from '../pipelines/chunker';
 import { EntityExtractor, type ExtractionResult } from '../pipelines/entity-extractor';
+import { assertHasExtractableText, NO_EXTRACTABLE_TEXT_MSG } from '../pipelines/extractable-text';
 
 /** BullMQ 任务载荷。fromStage 仅用于「从某阶段重跑」，缺省则走全量管线。 */
 interface IngestionJobData {
@@ -35,10 +37,10 @@ const GRAPH_EXTRACT_CONCURRENCY = 4;
  * 文档入库消费者（BullMQ queue=`ingestion`，同时处理 2 份文档）。
  *
  * 全量管线（process 主路径）：
- *   1. parse   MinerU 解析 PDF/Office → 结构化 blocks
- *   2. chunk   按标题层级 + 段落边界切成语义块
- *   3. index   Embedding 后双写 PGVector（语义检索）+ ES（关键词检索）
- *   4. graph   LLM 抽实体/关系写入 Neo4j；失败只降级，不阻断 READY
+ *   1. parse   MinerU / TextParser → 结构化 blocks；无可用正文则 FAILED
+ *   2. chunk   按标题切父块，父内切子块
+ *   3. index   仅子块 Embedding + ES；父块只落 PG
+ *   4. graph   仅父块抽实体写入 Neo4j；失败只降级，不阻断 READY
  *
  * 旁路：
  *   - 文档已软删除 → purge 清 chunk / ES / Neo4j / MinIO
@@ -116,16 +118,23 @@ export class IngestionProcessor extends WorkerHost {
             if (token) void job.extendLock(token, 60_000).catch(() => undefined);
           });
       this.langfuse.endSpan(parseSpan, { pages: parsed.meta.pages, blocks: parsed.blocks.length });
+      assertHasExtractableText(parsed);
       await this.trackJob(documentId, IngestionStage.PARSE, JobStatus.DONE);
       await this.assertNotDeleted(documentId);
 
-      // 2. 语义分块（纯 CPU，按标题路径聚合 + 超长二次切分）
+      // 2. 父子分块（纯 CPU：标题切父块，父内切子块）
       await this.transition(doc, DocumentStatus.CHUNKING, 30);
       const chunkSpan = this.langfuse.createSpan(trace, 'chunk', { blocks: parsed.blocks.length });
       const drafts = this.chunker.chunk(parsed.blocks);
-      this.langfuse.endSpan(chunkSpan, { chunks: drafts.length });
+      const childCount = drafts.filter((d) => d.role === 'child').length;
+      if (childCount === 0) throw new Error(NO_EXTRACTABLE_TEXT_MSG);
+      this.langfuse.endSpan(chunkSpan, {
+        drafts: drafts.length,
+        parents: drafts.length - childCount,
+        children: childCount,
+      });
       await this.trackJob(documentId, IngestionStage.CHUNK, JobStatus.DONE);
-      this.logger.log(`document ${documentId}: ${drafts.length} chunks`);
+      this.logger.log(`document ${documentId}: ${drafts.length - childCount} parents / ${childCount} children`);
 
       // 3. Embedding（小批量同步 / 大批量 Batch API）+ PGVector/ES 双写
       await this.transition(doc, DocumentStatus.INDEXING, 50);
@@ -137,7 +146,7 @@ export class IngestionProcessor extends WorkerHost {
       await this.transition(doc, DocumentStatus.GRAPHING, 85);
       await this.assertNotDeleted(documentId);
       try {
-        await this.buildGraph(doc, drafts, trace);
+        await this.buildGraph(doc, trace);
         await this.trackJob(documentId, IngestionStage.GRAPH, JobStatus.DONE);
       } catch (e) {
         this.logger.warn(`graph stage degraded: ${(e as Error).message}`);
@@ -161,11 +170,11 @@ export class IngestionProcessor extends WorkerHost {
   }
 
   /**
-   * Embedding + 双写（整段包一层 Langfuse `index` span，失败也结束）：
+   * 父子落库 + 子块双写（整段包一层 Langfuse `index` span，失败也结束）：
    *   1. 先删旧 chunk / ES 文档（重建与重试都幂等）
-   *   2. 按数量选同步或 Batch 通道做向量化（generation 记 token）
-   *   3. PG 事务写入（embedding 以 pgvector 文本格式 `[1,2,...]` 入库）
-   *   4. 再按落库后的 chunk.id 逐条写 ES，最后 refresh 让检索立即可用
+   *   2. 仅子块向量化（小批量同步 / 大批量 Batch）
+   *   3. 预生成 UUID：先插父块再插子块（FK），embedding 只写子块
+   *   4. 仅子块写 ES，最后 refresh
    */
   private async indexChunks(
     doc: DocumentEntity,
@@ -175,14 +184,16 @@ export class IngestionProcessor extends WorkerHost {
     token?: string,
     trace?: TraceHandle | null,
   ) {
-    const span = this.langfuse.createSpan(trace ?? null, 'index', { chunks: drafts.length });
+    const children = drafts.filter((d) => d.role === 'child');
+    const span = this.langfuse.createSpan(trace ?? null, 'index', {
+      drafts: drafts.length,
+      children: children.length,
+    });
     try {
-      // 重建 / 重试场景：先清旧数据，再全量写入
       await this.chunks.delete({ documentId: doc.id });
       await this.es.deleteByDocument(doc.id);
 
-      const texts = drafts.map((d) => this.chunker.enrichForEmbedding(doc.title, d));
-      // 按 chunk 数选通道：小批量走同步接口（秒级），大批量走 Batch API（半价异步）
+      const texts = children.map((d) => this.chunker.enrichForEmbedding(doc.title, d));
       const syncThreshold = this.config.get<number>('embedding.syncThreshold') ?? 20;
       const channel =
         texts.length === 0 ? 'skip' : texts.length <= syncThreshold ? 'sync' : 'batch';
@@ -193,28 +204,58 @@ export class IngestionProcessor extends WorkerHost {
             ? await this.embedViaSync(texts, trace)
             : await this.embedViaBatch(texts, job, token, trace);
 
-      await this.dataSource.transaction(async (em) => {
-        for (let i = 0; i < drafts.length; i++) {
-          await em.save(
-            em.create(DocumentChunkEntity, {
-              documentId: doc.id,
-              workspaceId: doc.workspaceId,
-              chunkIndex: i,
-              content: drafts[i].content,
-              headingPath: drafts[i].headingPath,
-              refs: drafts[i].refs,
-              embedding: `[${vectors[i].join(',')}]`,
-            }),
-          );
+      const parentIds = new Map<string, string>();
+      for (const draft of drafts) {
+        if (draft.role === 'parent') parentIds.set(draft.draftId, randomUUID());
+      }
+
+      const parentRows: Partial<DocumentChunkEntity>[] = [];
+      const childRows: Partial<DocumentChunkEntity>[] = [];
+      let chunkIndex = 0;
+      let childEmbed = 0;
+      for (const draft of drafts) {
+        if (draft.role === 'parent') {
+          parentRows.push({
+            id: parentIds.get(draft.draftId),
+            documentId: doc.id,
+            workspaceId: doc.workspaceId,
+            chunkIndex: chunkIndex++,
+            role: 'parent',
+            parentId: null,
+            content: draft.content,
+            headingPath: draft.headingPath,
+            refs: draft.refs,
+            embedding: null,
+          });
+          continue;
         }
+        childRows.push({
+          id: randomUUID(),
+          documentId: doc.id,
+          workspaceId: doc.workspaceId,
+          chunkIndex: chunkIndex++,
+          role: 'child',
+          parentId: draft.parentDraftId ? (parentIds.get(draft.parentDraftId) ?? null) : null,
+          content: draft.content,
+          headingPath: draft.headingPath,
+          refs: draft.refs,
+          embedding: `[${vectors[childEmbed++].join(',')}]`,
+        });
+      }
+
+      await this.dataSource.transaction(async (em) => {
+        for (const row of parentRows) await em.save(em.create(DocumentChunkEntity, row));
+        for (const row of childRows) await em.save(em.create(DocumentChunkEntity, row));
       });
 
-      // 必须先落 PG 再写 ES：ES 文档主键用的是 PG 生成的 chunk.id
       const docType = doc.title.includes('.')
         ? doc.title.split('.').pop()!.toLowerCase()
         : 'unknown';
-      const saved = await this.chunks.find({ where: { documentId: doc.id }, order: { chunkIndex: 'ASC' } });
-      for (const chunk of saved) {
+      const savedChildren = await this.chunks.find({
+        where: { documentId: doc.id, role: 'child' },
+        order: { chunkIndex: 'ASC' },
+      });
+      for (const chunk of savedChildren) {
         await this.es.indexChunk({
           chunk_id: chunk.id,
           document_id: doc.id,
@@ -223,6 +264,7 @@ export class IngestionProcessor extends WorkerHost {
           title: doc.title,
           content: chunk.content,
           heading_path: chunk.headingPath,
+          parent_id: chunk.parentId,
         });
       }
       await this.es.raw.indices.refresh({ index: this.es.indexName }).catch(() => undefined);
@@ -230,7 +272,11 @@ export class IngestionProcessor extends WorkerHost {
       await this.documents.update(doc.id, {
         meta: { ...doc.meta, pages: parsed.meta.pages, parser: parsed.meta.parser_version },
       });
-      this.langfuse.endSpan(span, { chunks: saved.length, channel });
+      this.langfuse.endSpan(span, {
+        parents: parentRows.length,
+        children: savedChildren.length,
+        channel,
+      });
     } catch (e) {
       this.langfuse.endSpan(span, {}, e as Error);
       throw e;
@@ -308,22 +354,17 @@ export class IngestionProcessor extends WorkerHost {
    *   - 全部抽完后一次性 buildForDocument（内部先删旧图再写）
    *   - LLM 用量汇总成一条 Langfuse generation（失败也落埋点）
    */
-  private async buildGraph(
-    doc: DocumentEntity,
-    drafts: Array<{ content: string; headingPath: string[] }>,
-    trace?: TraceHandle | null,
-  ) {
-    const span = this.langfuse.createSpan(trace ?? null, 'graph', { chunks: drafts.length });
+  private async buildGraph(doc: DocumentEntity, trace?: TraceHandle | null) {
+    const saved = await this.chunks.find({
+      where: { documentId: doc.id, role: 'parent' },
+      order: { chunkIndex: 'ASC' },
+    });
+    const span = this.langfuse.createSpan(trace ?? null, 'graph', { chunks: saved.length });
     const generation = this.langfuse.createGeneration(trace ?? null, {
       name: 'entity_extract',
       model: this.config.get<string>('llm.model') ?? 'unknown',
-      input: { chunks: drafts.length },
+      input: { chunks: saved.length },
     });
-    const saved = await this.chunks.find({ where: { documentId: doc.id }, order: { chunkIndex: 'ASC' } });
-    const sources =
-      drafts.length === saved.length
-        ? drafts
-        : saved.map((c) => ({ content: c.content, headingPath: c.headingPath }));
 
     const results: (ExtractionResult | null)[] = new Array(saved.length).fill(null);
     let cursor = 0;
@@ -331,9 +372,9 @@ export class IngestionProcessor extends WorkerHost {
     const runWorker = async () => {
       while (cursor < saved.length) {
         const i = cursor++;
-        const heading = sources[i]?.headingPath?.filter(Boolean).join(' > ') || null;
+        const heading = saved[i].headingPath?.filter(Boolean).join(' > ') || null;
         try {
-          results[i] = await this.extractor.extract(sources[i].content, heading, doc.title);
+          results[i] = await this.extractor.extract(saved[i].content, heading, doc.title);
         } catch (e) {
           failedChunks++;
           this.logger.warn(`chunk ${i} entity extract failed (skipped): ${(e as Error).message}`);
@@ -359,7 +400,7 @@ export class IngestionProcessor extends WorkerHost {
         return {
           chunkId: chunk.id,
           content: chunk.content,
-          heading: sources[i]?.headingPath?.filter(Boolean).join(' > ') || null,
+          heading: saved[i].headingPath?.filter(Boolean).join(' > ') || null,
           chunkIndex: chunk.chunkIndex,
           totalChunks: saved.length,
           entities: result?.entities ?? [],
@@ -390,13 +431,10 @@ export class IngestionProcessor extends WorkerHost {
   private async rebuildGraphOnly(doc: DocumentEntity) {
     await this.transition(doc, DocumentStatus.GRAPHING, 85);
     try {
-      const saved = await this.chunks.find({ where: { documentId: doc.id }, order: { chunkIndex: 'ASC' } });
-      await this.buildGraph(
-        doc,
-        saved.map((c) => ({ content: c.content, headingPath: c.headingPath })),
-      );
+      const saved = await this.chunks.countBy({ documentId: doc.id, role: 'parent' });
+      await this.buildGraph(doc);
       await this.trackJob(doc.id, IngestionStage.GRAPH, JobStatus.DONE);
-      this.logger.log(`document ${doc.id} graph rebuilt: ${saved.length} chunks`);
+      this.logger.log(`document ${doc.id} graph rebuilt: ${saved} parent chunks`);
     } catch (e) {
       this.logger.warn(`graph rebuild degraded: ${(e as Error).message}`);
       await this.trackJob(doc.id, IngestionStage.GRAPH, JobStatus.FAILED, (e as Error).message);

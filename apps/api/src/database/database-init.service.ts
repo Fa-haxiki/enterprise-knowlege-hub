@@ -27,10 +27,18 @@ export class DatabaseInitService implements OnApplicationBootstrap {
       // 注意：不向表中添加实体未声明的列（如 content_tsv 兜底列），
       // 否则 synchronize 会检测生成列并查询 typeorm_metadata，且可能 DROP 未声明列。
       // ES 故障时的 PG 全文兜底改由 migration 在生产的 schema 冻结后提供。
+      const idx = (await this.dataSource.query(
+        `SELECT indexdef FROM pg_indexes WHERE indexname = 'idx_chunks_embedding'`,
+      )) as Array<{ indexdef?: string }>;
+      const def = idx[0]?.indexdef ?? '';
+      if (!def.includes('WHERE')) {
+        await this.dataSource.query(`DROP INDEX IF EXISTS idx_chunks_embedding`);
+      }
       await this.dataSource.query(`
         CREATE INDEX IF NOT EXISTS idx_chunks_embedding
         ON document_chunks USING hnsw ((embedding::vector(1024)) vector_cosine_ops)
         WITH (m = 16, ef_construction = 64)
+        WHERE embedding IS NOT NULL
       `);
       this.logger.log('database extensions & indexes ready');
     } catch (e) {

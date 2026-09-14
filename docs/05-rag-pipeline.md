@@ -125,6 +125,7 @@ LIMIT 20;
 ### 2.3 Reranker 精排
 
 - 模型：`bge-reranker-v2-m3`（HTTP 服务，输入 query + 20 条候选，输出相关度分）
+- 召回与精排均在**子块**上做；精排后按 `parent_id` 去重，换成父块正文再进 Prompt / 引用
 - 取 **Top-6** 进入上下文；得分 < 0.35 的分片丢弃
 - 若 Top-1 得分 < 0.3：判定「库内无相关内容」，走兜底话术（避免幻觉），并在 LangFuse 标记 `low_recall`
 
@@ -226,20 +227,24 @@ A项目 --USES_SUPPLIER--> 华云科技 --SERVES--> B项目 --OWNED_BY--> 李四
 - 线上 API（mineru.net）：申请签名上传链接 → PUT 上传 → 轮询批量结果 → 下载 zip 解出 `content_list.json`，映射为结构化块（标题层级、段落、表格 HTML、公式 LaTeX、图片锚点、页码 bbox）
 - 支持类型：PDF / Doc / Docx / Ppt / Pptx / Xls / Xlsx（单文件 ≤200MB、≤200 页）
 - **纯文本类（md/txt/html）不走 MinerU**：worker 的 `TextParser` 本地解析为同样的结构化块——md 按 `#` 标题层级/围栏代码块/管道表格（转 HTML）切分，txt 按空行分段，html 剥标签；下游分块/索引/建图链路完全复用
+- **无正文拒收**：解析后若没有可检索正文（空文档、扫描件仅 `figure`、纯图片 Markdown/HTML），抛错并将 `document.status=FAILED`，不进入分块
 - 超时：轮询 15 min；失败重试 3 次后 `document.status=FAILED` 并通知上传人
 
-### 8.2 语义分块策略
+### 8.2 父子分块策略
 
 | 项 | 策略 |
 | --- | --- |
-| 切分依据 | 优先按 MinerU 标题层级（H1/H2/H3）切，再按 512 token 二次切分，overlap 64 token |
-| 表格 | 整块保留（HTML 转 Markdown），不跨块拆分；超 1024 token 按行组切分并保留表头 |
-| 元数据 | `heading_path`（如 ["第三章","报销标准"]）、`refs.page/bbox` 用于前端原文定位 |
-| 富化 | 每个 chunk 前拼接「文档标题 > 标题路径」作为上下文前缀再向量化 |
+| 父块 | 按 MinerU 标题层级（H1/H2/H3）切节；上限 `PARENT_CHUNK_SIZE`（默认 1024 token），超长按段落再切、父块之间无 overlap |
+| 子块 | 每个父块内按 `CHILD_CHUNK_SIZE`（默认 256）切，overlap `CHILD_CHUNK_OVERLAP`（默认 32）；短父块只产 1 个等长子块 |
+| 表格 | 整表单独成父块，不与前后段落合并 |
+| 索引 | 仅子块写 embedding / ES；父块只落 PG，供生成与建图 |
+| 召回 | ES + 向量召回子块 → Rerank 子块 → 按 `parent_id` 去重换成父块正文再进 prompt |
+| 元数据 | `heading_path`、`refs.page/bbox`；子块带 `parent_id` |
+| 富化 | 子块向量化前拼接「文档标题 > 标题路径」 |
 
 ### 8.3 实体抽取与建图
 
-- 按 chunk 抽取：LLM 输入「文档标题 + 章节 heading + 正文」，输出 `entities[]` 与 `relations[]`；类型经 `normalizeEntityType` / `normalizeRelationType` 归范，未知实体丢弃、未知关系落 `RELATED_TO`；source/target 不在本块实体集合中的关系丢弃
+- 按**父块**抽取：LLM 输入「文档标题 + 章节 heading + 正文」，输出 `entities[]` 与 `relations[]`；类型经 `normalizeEntityType` / `normalizeRelationType` 归范，未知实体丢弃、未知关系落 `RELATED_TO`；source/target 不在本块实体集合中的关系丢弃
 - 写入 Neo4j **先清后建**：`deleteForDocument` 再 MERGE `KnowledgeDocument` / `DocumentChunk` / `HAS_CHUNK` / `MENTIONS` / `RELATED_TO`
 - 实体按 `{name, workspace_id}` MERGE，RELATED_TO 两端必须同空间
 - 建图失败不阻断文档 READY（检索仍可用）

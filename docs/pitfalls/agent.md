@@ -23,7 +23,7 @@
 
 ## Chunker overlap：flush() 会清空 buffer，tail 必须先截
 
-- **现象**：配置了 `CHUNK_OVERLAP` 但相邻 chunk 从不重叠，跨块问句检索变差
+- **现象**：配置了 `CHILD_CHUNK_OVERLAP` 但相邻子块从不重叠，跨块问句检索变差
 - **根因**：`flush()` 内部把 `buffer` 置空，之后再 `buffer.slice(-overlapChars)` 永远得到空串
 - **修复**：先截 `tail = buffer.slice(-overlapChars)` 再 `flush()`，然后用 tail 作为下一块开头（`apps/worker/src/pipelines/chunker.ts`）
 - **相关**：`apps/worker/src/pipelines/chunker.ts`

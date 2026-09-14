@@ -82,8 +82,9 @@ export default () => ({
     secretKey: process.env.LANGFUSE_SECRET_KEY ?? '',
   },
   rag: {
-    chunkSize: parseInt(process.env.CHUNK_SIZE ?? '512', 10),
-    chunkOverlap: parseInt(process.env.CHUNK_OVERLAP ?? '64', 10),
+    parentChunkSize: parseInt(process.env.PARENT_CHUNK_SIZE ?? '1024', 10),
+    childChunkSize: parseInt(process.env.CHILD_CHUNK_SIZE ?? '256', 10),
+    childChunkOverlap: parseInt(process.env.CHILD_CHUNK_OVERLAP ?? '32', 10),
     retrieveTopK: parseInt(process.env.RETRIEVE_TOP_K ?? '20', 10),
     rerankTopN: parseInt(process.env.RERANK_TOP_N ?? '6', 10),
     rerankMinScore: parseFloat(process.env.RERANK_MIN_SCORE ?? '0.35'),

@@ -56,10 +56,12 @@ erDiagram
         uuid document_id FK
         uuid workspace_id FK "冗余, ACL 过滤"
         int chunk_index
+        varchar role "parent / child"
+        uuid parent_id FK "子块指向父块"
         text content
         jsonb heading_path "标题层级"
         jsonb refs "页码/表格/图片锚点"
-        vector embedding "1024 维"
+        vector embedding "1024 维, 仅子块"
         tsvector content_tsv "兜底全文"
         timestamptz created_at
     }
@@ -169,18 +171,23 @@ CREATE TABLE document_chunks (
     document_id  UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
     workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     chunk_index  INT NOT NULL,
+    role         VARCHAR(16) NOT NULL,          -- parent | child
+    parent_id    UUID REFERENCES document_chunks(id) ON DELETE CASCADE,
     content      TEXT NOT NULL,
     heading_path JSONB NOT NULL DEFAULT '[]',
     refs         JSONB NOT NULL DEFAULT '{}',   -- {page: 3, bbox: [...], table_id: ...}
-    embedding    VECTOR(1024),                  -- bge-m3
+    embedding    VECTOR(1024),                  -- 仅子块有值
     content_tsv  TSVECTOR GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (document_id, chunk_index)
 );
 
--- 向量检索：HNSW，余弦距离
+-- 向量检索：HNSW 只索引子块
 CREATE INDEX idx_chunks_embedding ON document_chunks
-    USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+    USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)
+    WHERE embedding IS NOT NULL;
+CREATE INDEX idx_chunks_parent ON document_chunks(parent_id);
+CREATE INDEX idx_chunks_role ON document_chunks(document_id, role);
 
 -- ACL 前置过滤 + 向量召回的复合查询样例：
 --   SELECT id, content, embedding <=> $1 AS score FROM document_chunks
@@ -248,6 +255,7 @@ CREATE INDEX idx_audit_time ON audit_logs(created_at DESC);
 ### 设计要点
 
 - `document_chunks.workspace_id` 冗余列：向量召回 SQL 直接 `workspace_id = ANY(白名单)` 完成 ACL 前置过滤，避免 JOIN
+- 父子分块同表：`role=parent` 供生成/建图，`role=child` 带 `parent_id` 与 embedding，检索命中后扩到父块
 - `content_tsv` 作为 ES 故障时的降级全文索引（`simple` 分词，中文按字切分，仅兜底）
 - 单表预计千万级 chunk 内不分区；超出后按 `workspace_id` LIST 分区
 
@@ -267,7 +275,7 @@ flowchart LR
 | 标签 | MERGE 键 | 主要属性 | 来源 |
 | --- | --- | --- | --- |
 | KnowledgeDocument | `{id}` | title, status, workspace_id | 入库建图 |
-| DocumentChunk | `{chunkId}`（PG `document_chunks.id`） | documentId, workspace_id, content, heading, chunkIndex | 入库建图 |
+| DocumentChunk | `{chunkId}`（PG 父块 `document_chunks.id`） | documentId, workspace_id, content, heading, chunkIndex | 入库建图（仅父块） |
 | KnowledgeEntity | `{name, workspace_id}` | type, description, aliases | LLM 抽取 |
 
 - 实体类型（`type` 属性，不是 Neo4j 标签）：`PERSON / DEPARTMENT / PROJECT / COMPANY / PRODUCT / DOCUMENT`；无法归类的实体丢弃（不入库）
@@ -307,6 +315,7 @@ PUT kb_chunks
       "title":        { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
       "content":      { "type": "text", "analyzer": "ik_max_word", "search_analyzer": "ik_smart" },
       "heading_path": { "type": "keyword" },
+      "parent_id":    { "type": "keyword" },
       "created_at":   { "type": "date" }
     }
   }
