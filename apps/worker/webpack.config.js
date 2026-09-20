@@ -9,7 +9,8 @@ module.exports = function (options) {
           !request.startsWith('.') &&
           !request.startsWith('/') &&
           !request.startsWith('@ekh/') &&
-          !request.startsWith('webpack')
+          !request.startsWith('webpack') &&
+          !/^[A-Za-z]:[\\/]/.test(request)
         ) {
           return callback(null, 'commonjs ' + request);
         }
