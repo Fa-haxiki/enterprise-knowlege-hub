@@ -13,9 +13,13 @@ import type { AgentStep, Conversation, Message } from '@/components/chat/types';
 
 /** status_detail 的 stage → LangGraph 节点名（用于把详情挂到对应步骤上） */
 const STAGE_TO_NODE: Record<string, string> = {
-  router: 'complexity_router',
-  retrieval: 'hybrid_retrieve',
+  router: 'intent_router',
+  intent: 'intent_router',
+  retrieval: 'kb_retrieve',
   graph: 'graph_reason',
+  evaluate: 'evaluate',
+  tool: 'execute_tools',
+  think: 'think',
 };
 
 function updateLastStep(steps: AgentStep[], pred: (s: AgentStep) => boolean, patch: Partial<AgentStep>): AgentStep[] {
@@ -249,7 +253,27 @@ export default function ChatPage() {
             update((m) => ({ ...m, content: m.content + delta }));
           },
           onCitation: (c) => update((m) => ({ ...m, citations: [...(m.citations ?? []), c] })),
+          onCitationsReset: () => update((m) => ({ ...m, citations: [] })),
           onGraphPath: (triples) => update((m) => ({ ...m, triples })),
+          onIntent: (intent, suggestedQuery) =>
+            update((m) => ({
+              ...m,
+              intent: intent as Message['intent'],
+              suggestedQuery,
+            })),
+          onToolStart: (name) =>
+            update((m) => ({
+              ...m,
+              toolCalls: [...(m.toolCalls ?? []), { name }],
+            })),
+          onToolEnd: (name, summary) =>
+            update((m) => ({
+              ...m,
+              toolCalls: (m.toolCalls ?? []).map((t, i, arr) =>
+                i === arr.map((x) => x.name).lastIndexOf(name) ? { ...t, summary } : t,
+              ),
+            })),
+          onThinking: (text) => update((m) => ({ ...m, thinking: text })),
           onUsage: (u) =>
             update((m) => ({
               ...m,
@@ -257,6 +281,8 @@ export default function ChatPage() {
               latencyMs: u.latency_ms ?? null,
               nodeLatencies: u.node_latencies ?? null,
               degradedNodes: u.degraded ?? [],
+              intent: (u.intent as Message['intent']) ?? m.intent,
+              thinking: u.thinking ?? m.thinking,
             })),
           onFinished: (result) => {
             // 仅记录 serverId，不改动 id——id 作为 React key，变更会导致整条消息重挂载闪烁
@@ -265,6 +291,7 @@ export default function ChatPage() {
               serverId: result.message_id,
               streaming: false,
               complexity: result.complexity,
+              intent: (result.intent as Message['intent']) ?? m.intent,
             }));
             if (!conversationId) {
               skipMsgLoadRef.current = result.conversation_id;

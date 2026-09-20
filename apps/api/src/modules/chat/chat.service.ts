@@ -1,7 +1,16 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
-import { Complexity, ErrorCode, MessageRole, type Citation, type Triple } from '@ekh/shared';
+import {
+  AgentIntent,
+  Complexity,
+  ErrorCode,
+  MessageRole,
+  type Citation,
+  type NodeLatency,
+  type ToolTrace,
+  type Triple,
+} from '@ekh/shared';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
 import { ConversationEntity } from '../../database/entities/conversation.entity';
 import { MessageEntity } from '../../database/entities/message.entity';
@@ -93,17 +102,30 @@ export class ChatService {
     messageId: string,
     data: {
       complexity: Complexity | null;
+      intent?: AgentIntent | null;
+      iterations?: number;
+      thinking?: string | null;
+      suggestedQuery?: string | null;
+      toolTrace?: ToolTrace[];
+      stepTrace?: NodeLatency[];
       recalledChunkIds: string[];
       graphTriples: Triple[];
       nodeLatencies: Record<string, number>;
       degradedNodes: string[];
       langfuseTraceId?: string;
+      externalFacts?: string[];
     },
   ) {
     await this.qaRecords.save(
       this.qaRecords.create({
         messageId,
         complexity: data.complexity,
+        intent: data.intent ?? null,
+        iterations: data.iterations ?? 0,
+        thinking: data.thinking ?? null,
+        suggestedQuery: data.suggestedQuery ?? null,
+        toolTrace: data.toolTrace ?? [],
+        stepTrace: data.stepTrace ?? [],
         recalledChunkIds: data.recalledChunkIds,
         graphTriples: data.graphTriples,
         nodeLatencies: data.nodeLatencies,
@@ -114,12 +136,26 @@ export class ChatService {
   }
 
   /** 更新短期窗口；溢出部分异步压缩进滚动摘要 */
-  async updateMemory(conversationId: string, userId: string, round: WindowMessage[]) {
+  async updateMemory(
+    conversationId: string,
+    userId: string,
+    round: WindowMessage[],
+    externalFacts: string[] = [],
+  ) {
     const overflow = await this.memory.appendWindow(conversationId, round);
     if (overflow.length > 0) {
       void this.compressOverflow(conversationId, overflow);
     }
-    this.memory.addLongTerm(userId, conversationId, round);
+    const longTerm = externalFacts.length
+      ? [
+          ...round,
+          {
+            role: 'assistant' as const,
+            content: `本轮确认的外部事实：\n${externalFacts.map((f) => `- ${f}`).join('\n')}`,
+          },
+        ]
+      : round;
+    this.memory.addLongTerm(userId, conversationId, longTerm);
   }
 
   private async compressOverflow(conversationId: string, overflow: WindowMessage[]) {
@@ -206,6 +242,17 @@ export class ChatService {
         ...m,
         triples: record?.graphTriples ?? [],
         complexity: record?.complexity ?? null,
+        intent: record?.intent ?? null,
+        suggestedQuery: record?.suggestedQuery ?? undefined,
+        thinking: record?.thinking ?? null,
+        toolCalls: record?.toolTrace ?? [],
+        steps: (record?.stepTrace ?? []).map((s) => ({
+          name: s.name,
+          status: s.degraded ? 'degraded' : 'done',
+          startedAt: 0,
+          latencyMs: s.latencyMs,
+          detail: s.iteration > 0 ? `第 ${s.iteration + 1} 轮` : undefined,
+        })),
         nodeLatencies: record?.nodeLatencies ?? null,
         degradedNodes: record?.degradedNodes ?? [],
       };

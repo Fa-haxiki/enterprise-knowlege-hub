@@ -100,6 +100,20 @@ services:
         condition: service_healthy
     profiles: ["full"]
 
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    environment:
+      SEARXNG_BASE_URL: http://localhost:8088/
+    volumes:
+      - ./deploy/searxng:/etc/searxng
+    ports:
+      - "127.0.0.1:8088:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
   tts:
     image: ${TTS_IMAGE:-ekh-tts:latest}
     build:

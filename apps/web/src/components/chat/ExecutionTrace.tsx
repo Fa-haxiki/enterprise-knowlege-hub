@@ -1,15 +1,13 @@
 import { useState } from 'react';
-import { STEP_LABELS, STEP_ORDER, type AgentStep } from './types';
+import { STEP_LABELS, type AgentStep, type ToolCallInfo } from './types';
 
 interface ExecutionTraceProps {
-  /** 流式消息的实时步骤（含状态与耗时） */
   steps?: AgentStep[];
-  /** 历史消息：各节点耗时（usage 事件 / 消息接口带出） */
+  toolCalls?: ToolCallInfo[];
   nodeLatencies?: Record<string, number> | null;
   degraded?: string[];
   latencyMs?: number | null;
   tokens?: number;
-  /** 流式进行中：running 步骤显示 spinner，汇总行显示进度 */
   streaming?: boolean;
 }
 
@@ -33,12 +31,18 @@ function RowIcon({ status }: { status: AgentStep['status'] }) {
   );
 }
 
+function parseHistoryName(key: string): { name: string; round: number } {
+  const m = key.match(/^(.*)#(\d+)$/);
+  if (!m) return { name: key, round: 0 };
+  return { name: m[1], round: Number(m[2]) };
+}
+
 /**
- * 执行链路面板：回答完成后展示完整 Agent 链路（纵向步骤 + 耗时 + 汇总），
- * 数据优先取实时 steps，历史消息由 node_latencies 重建。
+ * 本轮过程：按发生顺序展示，同名步骤带轮次。
  */
 export default function ExecutionTrace({
   steps,
+  toolCalls,
   nodeLatencies,
   degraded,
   latencyMs,
@@ -50,28 +54,32 @@ export default function ExecutionTrace({
   const all: AgentStep[] =
     steps && steps.length > 0
       ? steps
-      : Object.entries(nodeLatencies ?? {}).map(([name, ms]) => ({
-          name,
-          status: (degraded?.includes(name) ? 'degraded' : 'done') as AgentStep['status'],
-          startedAt: 0,
-          latencyMs: ms,
-        }));
+      : Object.entries(nodeLatencies ?? {}).map(([key, ms]) => {
+          const { name } = parseHistoryName(key);
+          return {
+            name,
+            status: (degraded?.includes(name) ? 'degraded' : 'done') as AgentStep['status'],
+            startedAt: 0,
+            latencyMs: ms,
+            detail: key.includes('#') ? `第 ${parseHistoryName(key).round + 1} 轮` : undefined,
+          };
+        });
 
-  // 隐藏瞬时完成的内部节点（权限校验/加载对话等 <50ms），只展示有实际耗时的核心步骤；
-  // 进行中的步骤无论耗时都展示；并按真实执行顺序排序（node_latencies 的 key 顺序是 state 合并序，不可靠）
-  const orderOf = (name: string) => {
-    const i = STEP_ORDER.indexOf(name);
-    return i === -1 ? STEP_ORDER.length : i;
-  };
+  const counts = new Map<string, number>();
   const rows = all
-    .filter((s) => s.status === 'running' || (s.latencyMs ?? 0) >= 50)
-    .sort((a, b) => orderOf(a.name) - orderOf(b.name));
+    .filter((s) => s.status === 'running' || (s.latencyMs ?? 0) >= 50 || !!s.detail)
+    .map((s) => {
+      const n = (counts.get(s.name) ?? 0) + 1;
+      counts.set(s.name, n);
+      return { ...s, round: n };
+    });
 
   if (rows.length === 0) return null;
 
   const totalMs = latencyMs ?? rows.reduce((sum, r) => sum + (r.latencyMs ?? 0), 0);
   const hasDegraded = rows.some((r) => r.status === 'degraded');
   const doneCount = rows.filter((r) => r.status !== 'running').length;
+  const multi = [...counts.values()].some((n) => n > 1);
 
   return (
     <div className="mb-3 overflow-hidden rounded-xl border border-border bg-card">
@@ -83,7 +91,7 @@ export default function ExecutionTrace({
           <path d="M4 17l6-6-6-6" />
           <path d="M12 19h8" />
         </svg>
-        执行链路
+        本轮过程
         <span className="text-ink-400">共 {rows.length} 步</span>
         <svg
           width="12"
@@ -109,9 +117,15 @@ export default function ExecutionTrace({
                 <span className={s.status === 'degraded' ? 'text-amber-600 dark:text-amber-400' : 'text-ink-700 dark:text-ink-300'}>
                   {STEP_LABELS[s.name] ?? s.name}
                 </span>
+                {multi && s.round > 1 && (
+                  <span className="rounded bg-subtle px-1 text-[10px] text-ink-400">第 {s.round} 轮</span>
+                )}
                 {s.status === 'degraded' && <span className="text-ink-400">（已降级）</span>}
-                {s.status === 'running' && s.detail && (
-                  <span className="truncate text-ink-400">{s.detail}</span>
+                {s.detail && <span className="truncate text-ink-400">{s.detail}</span>}
+                {!s.detail && toolCalls?.find((t) => t.name === s.name)?.summary && (
+                  <span className="truncate text-ink-400">
+                    {toolCalls.find((t) => t.name === s.name)?.summary}
+                  </span>
                 )}
                 <span className="ml-auto tabular-nums text-ink-400">
                   {s.latencyMs != null ? `${(s.latencyMs / 1000).toFixed(1)}s` : ''}

@@ -152,9 +152,15 @@ export class ChatController {
       );
       await this.chat.saveQaRecord(assistantMsg.id, {
         complexity: result.complexity ?? null,
+        intent: result.intent ?? null,
+        suggestedQuery: result.suggestedQuery || null,
+        iterations: result.iteration,
+        thinking: result.thinking || null,
+        toolTrace: result.toolTrace,
+        stepTrace: result.nodeLatencies,
         recalledChunkIds: result.rerankedChunks.map((c) => c.chunk_id),
         graphTriples: result.graphTriples,
-        nodeLatencies: result.nodeLatencies,
+        nodeLatencies: this.agent.latencyMap(result),
         degradedNodes: result.degraded,
         langfuseTraceId: traceId ?? undefined,
       });
@@ -163,13 +169,16 @@ export class ChatController {
       send(SseEvent.USAGE, {
         ...result.usage,
         latency_ms: latencyMs,
-        node_latencies: result.nodeLatencies,
+        node_latencies: this.agent.latencyMap(result),
         degraded: result.degraded,
+        intent: result.intent,
+        thinking: result.thinking,
       });
       send(SseEvent.DONE, {
         message_id: assistantMsg.id,
         conversation_id: conv.id,
         complexity: result.complexity ?? null,
+        intent: result.intent ?? null,
       });
 
       this.audit.record({
@@ -179,10 +188,15 @@ export class ChatController {
         resourceId: conv.id,
         detail: { complexity: result.complexity, latency_ms: latencyMs },
       });
-      void this.chat.updateMemory(conv.id, user.userId, [
-        { role: 'user', content: dto.query },
-        { role: 'assistant', content: result.answer },
-      ]);
+      void this.chat.updateMemory(
+        conv.id,
+        user.userId,
+        [
+          { role: 'user', content: dto.query },
+          { role: 'assistant', content: result.answer },
+        ],
+        result.webHits.map((h) => `${h.title} ${h.url}`.trim()).filter(Boolean),
+      );
     } catch (e) {
       send(SseEvent.ERROR, {
         code: ErrorCode.INTERNAL,

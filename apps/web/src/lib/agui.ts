@@ -8,6 +8,8 @@ export interface Citation {
   title: string;
   page?: number;
   snippet: string;
+  source?: 'kb' | 'web';
+  url?: string;
 }
 
 export type Triple = [string, string, string];
@@ -24,17 +26,18 @@ export interface RunResult {
   message_id: string;
   conversation_id: string;
   complexity: 'simple' | 'complex' | null;
-  /** 会话标题（新会话为自动生成的标题），用于前端本地更新侧边栏 */
+  intent?: string | null;
   title?: string;
 }
 
-/** usage CUSTOM 事件：汇总耗时 / token / 各节点耗时 / 降级节点 */
 export interface UsageInfo {
   prompt_tokens?: number;
   completion_tokens?: number;
   latency_ms?: number;
   node_latencies?: Record<string, number>;
   degraded?: string[];
+  intent?: string;
+  thinking?: string;
 }
 
 export interface AguiHandlers {
@@ -43,16 +46,17 @@ export interface AguiHandlers {
   onStatusDetail(stage: string, detail: string): void;
   onToken(delta: string): void;
   onCitation(c: Citation): void;
+  onCitationsReset?(): void;
   onGraphPath(triples: Triple[]): void;
   onUsage(u: UsageInfo): void;
+  onIntent?(intent: string, suggestedQuery: string): void;
+  onToolStart?(name: string): void;
+  onToolEnd?(name: string, summary?: string): void;
+  onThinking?(text: string): void;
   onFinished(result: RunResult): void;
   onError(message: string): void;
 }
 
-/**
- * 通过 AG-UI 协议发起一次问答运行。
- * threadId 即会话 id（新对话传 undefined，由 client 生成并作为会话 id 落库）。
- */
 export async function runChatAgent(args: {
   accessToken: string;
   threadId?: string;
@@ -81,6 +85,8 @@ export async function runChatAgent(args: {
           value?: unknown;
           result?: RunResult;
           message?: string;
+          toolCallName?: string;
+          toolCallId?: string;
         };
         switch (event.type) {
           case EventType.STEP_STARTED:
@@ -94,11 +100,17 @@ export async function runChatAgent(args: {
             break;
           case EventType.CUSTOM:
             if (e.name === 'citation') h.onCitation(e.value as Citation);
+            else if (e.name === 'citations_reset') h.onCitationsReset?.();
             else if (e.name === 'graph_path') h.onGraphPath((e.value as { triples: Triple[] }).triples);
             else if (e.name === 'usage') h.onUsage(e.value as UsageInfo);
             else if (e.name === 'status_detail') {
               const v = e.value as { stage: string; detail: string };
               h.onStatusDetail(v.stage, v.detail);
+            } else if (e.name === 'intent') {
+              const v = e.value as { intent: string; suggestedQuery: string };
+              h.onIntent?.(v.intent, v.suggestedQuery);
+            } else if (e.name === 'think' && typeof e.value === 'string') {
+              h.onThinking?.(e.value);
             }
             break;
           case EventType.RUN_FINISHED:
@@ -107,8 +119,13 @@ export async function runChatAgent(args: {
           case EventType.RUN_ERROR:
             h.onError(e.message ?? '问答失败');
             break;
-          default:
+          default: {
+            const t = event.type as string;
+            if (t === 'TOOL_CALL_START' && e.toolCallName) h.onToolStart?.(e.toolCallName);
+            else if (t === 'TOOL_CALL_END' && e.toolCallName) h.onToolEnd?.(e.toolCallName);
+            else if (t === 'REASONING_CONTENT' && e.delta) h.onThinking?.(e.delta);
             break;
+          }
         }
       },
     },

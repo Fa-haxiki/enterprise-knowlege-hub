@@ -6,7 +6,7 @@ import {
   ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
-import { Complexity, type Triple } from '@ekh/shared';
+import { AgentIntent, Complexity, type NodeLatency, type ToolTrace, type Triple } from '@ekh/shared';
 import { MessageEntity } from './message.entity';
 
 /** 问答观测快照：召回分片、图谱链路、各节点耗时 */
@@ -24,6 +24,24 @@ export class QaRecordEntity {
 
   @Column({ type: 'varchar', length: 16, nullable: true })
   complexity: Complexity | null;
+
+  @Column({ type: 'varchar', length: 32, nullable: true })
+  intent: AgentIntent | null;
+
+  @Column({ type: 'int', default: 0 })
+  iterations: number;
+
+  @Column({ name: 'tool_trace', type: 'jsonb', default: [] })
+  toolTrace: ToolTrace[];
+
+  @Column({ name: 'step_trace', type: 'jsonb', default: [] })
+  stepTrace: NodeLatency[];
+
+  @Column({ name: 'suggested_query', type: 'text', nullable: true })
+  suggestedQuery: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  thinking: string | null;
 
   @Column({ name: 'recalled_chunk_ids', type: 'jsonb', default: [] })
   recalledChunkIds: string[];

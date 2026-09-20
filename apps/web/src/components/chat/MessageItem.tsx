@@ -4,7 +4,7 @@ import { api } from '@/lib/api';
 import DocPreviewModal, { type DocPreview } from '@/components/DocPreviewModal';
 import ExecutionTrace from './ExecutionTrace';
 import MarkdownBody from './MarkdownBody';
-import type { Message } from './types';
+import { INTENT_LABELS, type AgentIntent, type Message } from './types';
 
 const GraphView = lazy(() => import('./GraphView'));
 
@@ -57,11 +57,16 @@ function CitationPanel({ message }: { message: Message }) {
   };
 
   if (!message.citations?.length) return null;
-  const sources = groupCitationsByDocument(message.citations);
+  const kb = message.citations.filter((c) => c.source !== 'web');
+  const web = message.citations.filter((c) => c.source === 'web');
+  const sources = groupCitationsByDocument(kb);
+  if (sources.length === 0 && web.length === 0) return null;
   return (
     <div className="mt-3 border-t border-border pt-2">
+      {sources.length > 0 && (
+        <>
       <div className="mb-1.5 text-xs font-medium text-ink-400">
-        引用来源
+        内部资料
         <span className="ml-1 font-normal">· {sources.length} 篇</span>
       </div>
       <div className="flex flex-wrap gap-1">
@@ -93,6 +98,83 @@ function CitationPanel({ message }: { message: Message }) {
         ))}
       </div>
       {preview && <DocPreviewModal doc={preview} onClose={() => setPreview(null)} />}
+        </>
+      )}
+      {web.length > 0 && (
+        <div className={sources.length > 0 ? 'mt-2' : ''}>
+          <div className="mb-1.5 text-xs font-medium text-ink-400">
+            外部公开信息
+            <span className="ml-1 font-normal">· {web.length} 条</span>
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {web.map((w) => (
+              <a
+                key={`${w.ref_id}-${w.url}`}
+                href={w.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="group flex max-w-72 items-center gap-1.5 rounded-md border border-border bg-subtle/50 px-1.5 py-1 text-left text-xs transition-colors hover:border-brand-500/40 hover:bg-brand-600/5"
+                title={w.snippet}
+              >
+                <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-brand-600/10 text-[10px] font-semibold text-brand-600">
+                  {w.ref_id}
+                </span>
+                <span className="truncate font-medium text-ink-600 group-hover:text-brand-700">{w.title}</span>
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ThinkingPanel({ text, streaming }: { text: string; streaming?: boolean }) {
+  const [collapsed, setCollapsed] = useState(!streaming);
+  useEffect(() => {
+    setCollapsed(!streaming);
+  }, [streaming]);
+  if (!text) return null;
+  return (
+    <div className="mb-3 overflow-hidden rounded-xl border border-border/80 bg-subtle/40">
+      <button
+        type="button"
+        onClick={() => setCollapsed((v) => !v)}
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-xs font-medium text-ink-500"
+      >
+        思考过程
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          className={`ml-auto transition-transform ${collapsed ? '' : 'rotate-180'}`}
+        >
+          <path d="m18 15-6-6-6 6" />
+        </svg>
+      </button>
+      {!collapsed && <div className="border-t border-border px-3 py-2 text-xs leading-5 text-ink-500 whitespace-pre-wrap">{text}</div>}
+    </div>
+  );
+}
+
+function showTrace(m: Message): boolean {
+  if (m.intent === 'chitchat' || m.intent === 'preference') {
+    const names = m.steps?.map((s) => s.name) ?? [];
+    return names.some((n) => n === 'kb_retrieve' || n === 'web_search' || n === 'evaluate' || n === 'hybrid_retrieve');
+  }
+  return !!(m.steps?.length || m.nodeLatencies || m.toolCalls?.length);
+}
+
+function IntentChip({ intent, suggestedQuery }: { intent: AgentIntent; suggestedQuery?: string }) {
+  return (
+    <div className="mb-2 flex flex-wrap items-center gap-1.5">
+      <span className="inline-flex items-center rounded-full bg-brand-600/10 px-2 py-0.5 text-xs font-medium text-brand-600">
+        {INTENT_LABELS[intent] ?? intent}
+      </span>
+      {suggestedQuery && <span className="truncate text-[11px] text-ink-400">检索词：{suggestedQuery}</span>}
     </div>
   );
 }
@@ -212,9 +294,10 @@ export default function MessageItem({ message: m, playing, onFeedback, onSpeak }
 
       <div className="min-w-0 flex-1 rounded-bubble rounded-tl-md border border-border bg-card px-4 py-3 text-sm leading-6 shadow-card">
         {/* 执行链路面板：流式进行中与完成后为同一组件，无切换闪烁（历史消息由 node_latencies 重建） */}
-        {(m.steps?.length || m.nodeLatencies) && (
+        {showTrace(m) && (
           <ExecutionTrace
             steps={m.steps}
+            toolCalls={m.toolCalls}
             nodeLatencies={m.nodeLatencies}
             degraded={m.degradedNodes}
             latencyMs={m.latencyMs}
@@ -225,13 +308,9 @@ export default function MessageItem({ message: m, playing, onFeedback, onSpeak }
           />
         )}
 
-        {m.complexity === 'complex' && !m.streaming && (
-          <span className="mb-2 inline-flex items-center gap-1 rounded-full bg-brand-600/10 px-2 py-0.5 text-xs font-medium text-brand-600">
-            图谱推理
-          </span>
-        )}
+        {m.intent && <IntentChip intent={m.intent} suggestedQuery={m.suggestedQuery} />}
+        {m.thinking ? <ThinkingPanel text={m.thinking} streaming={m.streaming} /> : null}
 
-        {/* 播放语音时保持 Markdown 渲染样式，仅按钮状态变化 */}
         <MarkdownBody content={m.content} />
         {m.streaming && (
           <span className="ml-0.5 inline-block h-4 w-2 animate-blink bg-brand-600 align-text-bottom" />

@@ -93,4 +93,40 @@ export class LlmService {
 
     return { iterator, usage };
   }
+
+  /**
+   * 带工具声明的非流式调用。模型若不支持 function calling，只返回文本。
+   */
+  async invokeWithTools(
+    messages: BaseMessage[],
+    tools: { name: string; description: string; schema?: Record<string, unknown> }[],
+    options?: { model?: string; temperature?: number; timeout?: number },
+  ): Promise<{
+    text: string;
+    toolCalls: { name: string; args: Record<string, unknown> }[];
+    usage: ChatUsage;
+  }> {
+    const base = this.createChatModel(options);
+    const openaiTools = tools.map((t) => ({
+      type: 'function' as const,
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.schema ?? { type: 'object', properties: { query: { type: 'string' } } },
+      },
+    }));
+    const model = base.bindTools(openaiTools);
+    const res = await model.invoke(this.maskMessages(messages));
+    const text = typeof res.content === 'string' ? res.content : '';
+    const u = res.usage_metadata;
+    const toolCalls = (res.tool_calls ?? []).map((c) => ({
+      name: c.name,
+      args: (c.args ?? {}) as Record<string, unknown>,
+    }));
+    return {
+      text,
+      toolCalls,
+      usage: { prompt_tokens: u?.input_tokens ?? 0, completion_tokens: u?.output_tokens ?? 0 },
+    };
+  }
 }

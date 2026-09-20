@@ -18,12 +18,13 @@ flowchart TB
         MinIO["minio"]
         MinerU["mineru-api<br/>CPU/GPU"]
         Mem0["mem0"]
+        SearXNG["searxng"]
         LFWeb["langfuse-web + worker"]
         LFPG["(langfuse 复用 postgres<br/>独立 database)"]
         Click["clickhouse<br/>langfuse 依赖"]
     end
     Nginx --> Web & API
-    API --> PG & ES & Neo4j & Redis & MinIO & Mem0 & MinerU
+    API --> PG & ES & Neo4j & Redis & MinIO & Mem0 & MinerU & SearXNG
     Worker --> PG & ES & Neo4j & Redis & MinIO & MinerU
     API --> LFWeb --> Click
 ```
@@ -180,6 +181,9 @@ TTS_API_KEY=
 # ---- 内部服务 ----
 MINERU_URL=http://mineru:8700
 MEM0_URL=http://mem0:8888
+AGENT_ENABLE_WEB=true
+AGENT_WEB_PROVIDER=searxng
+AGENT_WEB_URL=http://searxng:8080
 LANGFUSE_HOST=http://langfuse-web:3000
 LANGFUSE_PUBLIC_KEY=pk-lf-...
 LANGFUSE_SECRET_KEY=sk-lf-...

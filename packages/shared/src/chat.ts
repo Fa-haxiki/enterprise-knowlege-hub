@@ -1,4 +1,4 @@
-import type { Complexity } from './enums';
+import type { AgentIntent, Complexity, EvidenceGrade, ToolName } from './enums';
 
 /** 引用分片（SSE citation 帧 + messages.citations 落库结构） */
 export interface Citation {
@@ -9,7 +9,30 @@ export interface Citation {
   page?: number;
   snippet: string;
   score?: number;
+  /** 缺省为内部知识库；联网结果带 url */
+  source?: 'kb' | 'web';
+  url?: string;
 }
+
+/** 节点耗时（循环下同名节点可出现多次） */
+export interface NodeLatency {
+  name: string;
+  latencyMs: number;
+  iteration: number;
+  degraded: boolean;
+}
+
+/** 工具调用痕迹 */
+export interface ToolTrace {
+  name: ToolName | string;
+  args?: Record<string, unknown>;
+  summary?: string;
+  latencyMs: number;
+  iteration: number;
+  degraded?: boolean;
+}
+
+export type { AgentIntent, EvidenceGrade, ToolName };
 
 /** 图谱推理三元组 */
 export type Triple = [string, string, string];
@@ -34,20 +57,23 @@ export interface SseMetaPayload {
 }
 
 export interface SseStatusPayload {
-  stage: 'retrieval' | 'rerank' | 'graph' | 'memory' | 'generate';
+  stage: 'retrieval' | 'rerank' | 'graph' | 'memory' | 'generate' | 'intent' | 'evaluate' | 'tool' | 'think';
   detail: string;
-}
-
-export interface SseTokenPayload {
-  delta: string;
 }
 
 export interface SseUsagePayload {
   prompt_tokens: number;
   completion_tokens: number;
   latency_ms: number;
+  /** 兼容旧前端：同名取最后一次 */
   node_latencies: Record<string, number>;
   degraded: string[];
+  intent?: AgentIntent;
+  thinking?: string;
+}
+
+export interface SseTokenPayload {
+  delta: string;
 }
 
 export interface SseErrorPayload {

@@ -20,7 +20,7 @@ if [ -n "$LAN_IP" ] && [ -f .env ]; then
   fi
 fi
 
-# 1. Docker 中间件（postgres/neo4j/es/redis/minio/tts/mem0）
+# 1. Docker 中间件（postgres/neo4j/es/redis/minio/tts/searxng；mem0 在 full profile）
 echo "==> 启动 Docker 服务..."
 docker compose up -d
 

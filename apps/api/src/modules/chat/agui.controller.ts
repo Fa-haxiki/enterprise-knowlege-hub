@@ -156,7 +156,22 @@ export class AguiController {
             send({ type: 'TEXT_MESSAGE_CONTENT', messageId: streamMsgId, delta });
           },
           onCitation: (citation) => send({ type: 'CUSTOM', name: 'citation', value: citation }),
+          onCitationsReset: () => send({ type: 'CUSTOM', name: 'citations_reset', value: true }),
           onGraphPath: (triples) => send({ type: 'CUSTOM', name: 'graph_path', value: { triples } }),
+          onIntent: (intent, suggestedQuery) =>
+            send({ type: 'CUSTOM', name: 'intent', value: { intent, suggestedQuery } }),
+          onToolStart: (name, args) => {
+            send({ type: 'TOOL_CALL_START', toolCallName: name, toolCallId: `${runId}-${name}` });
+            if (args) send({ type: 'TOOL_CALL_ARGS', toolCallId: `${runId}-${name}`, delta: JSON.stringify(args) });
+          },
+          onToolEnd: (name, summary) =>
+            send({ type: 'TOOL_CALL_END', toolCallId: `${runId}-${name}`, toolCallName: name, result: summary }),
+          onThinking: (text) => {
+            send({ type: 'REASONING_START', messageId: streamMsgId });
+            send({ type: 'REASONING_CONTENT', messageId: streamMsgId, delta: text });
+            send({ type: 'REASONING_END', messageId: streamMsgId });
+            send({ type: 'CUSTOM', name: 'think', value: text });
+          },
         },
       );
       if (textStarted) send({ type: 'TEXT_MESSAGE_END', messageId: streamMsgId });
@@ -177,9 +192,15 @@ export class AguiController {
       );
       await this.chat.saveQaRecord(assistantMsg.id, {
         complexity: result.complexity ?? null,
+        intent: result.intent ?? null,
+        suggestedQuery: result.suggestedQuery || null,
+        iterations: result.iteration,
+        thinking: result.thinking || null,
+        toolTrace: result.toolTrace,
+        stepTrace: result.nodeLatencies,
         recalledChunkIds: result.rerankedChunks.map((c) => c.chunk_id),
         graphTriples: result.graphTriples,
-        nodeLatencies: result.nodeLatencies,
+        nodeLatencies: this.agent.latencyMap(result),
         degradedNodes: result.degraded,
         langfuseTraceId: traceId ?? undefined,
       });
@@ -190,19 +211,22 @@ export class AguiController {
         value: {
           ...result.usage,
           latency_ms: latencyMs,
-          node_latencies: result.nodeLatencies,
+          node_latencies: this.agent.latencyMap(result),
           degraded: result.degraded,
+          intent: result.intent,
+          thinking: result.thinking,
         },
       });
       send({
         type: 'RUN_FINISHED',
         threadId,
         runId,
+        messageId: streamMsgId,
         result: {
           message_id: assistantMsg.id,
           conversation_id: conv.id,
           complexity: result.complexity ?? null,
-          // 带给前端直接更新侧边栏，避免每次问答后整表重拉 conversations
+          intent: result.intent ?? null,
           title,
         },
       });
@@ -214,10 +238,15 @@ export class AguiController {
         resourceId: conv.id,
         detail: { complexity: result.complexity, latency_ms: latencyMs, protocol: 'ag-ui' },
       });
-      void this.chat.updateMemory(conv.id, user.userId, [
-        { role: 'user', content: query },
-        { role: 'assistant', content: result.answer },
-      ]);
+      void this.chat.updateMemory(
+        conv.id,
+        user.userId,
+        [
+          { role: 'user', content: query },
+          { role: 'assistant', content: result.answer },
+        ],
+        result.webHits.map((h) => `${h.title} ${h.url}`.trim()).filter(Boolean),
+      );
     } catch (e) {
       // 问答失败也要把已生成的标题落库，避免新会话停留在默认标题
       if (titlePromise) {

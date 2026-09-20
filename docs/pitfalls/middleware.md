@@ -90,3 +90,10 @@
 - **根因**：①系统代理启用时 mineru.net 直连被中间设备干扰（curl 读系统代理所以正常，Node fetch 默认直连）；②走代理后 undici keep-alive 复用的空闲隧道连接已被代理回收，复用即 ECONNRESET 或静默挂起
 - **修复**：最终方案是关掉系统代理走纯直连（用户网络环境 mineru.net/阿里云直连可达）；若必须走代理，需 `NODE_USE_ENV_PROXY=1` + 禁 keep-alive 的 dispatcher（`new Agent({keepAliveTimeout:1})`，且 undici 包版本须与 Node 内置 fetch 协议匹配，Node 24 用 undici@7，@8 会报 `UND_ERR_INVALID_ARG invalid onRequestStart`）
 - **相关**：`apps/worker/src/pipelines/mineru.client.ts` fetchWithCause（保留 cause 日志便于定位）
+
+## SearXNG 默认禁用 JSON，且 limiter 会拦服务端 fetch
+
+- **现象**：`GET /search?format=json` 返回 403，或 HTML 搜索页；Agent `web_search` 打日志 `searxng 403` 后空结果
+- **根因**：官方默认 `search.formats` 只有 html；`server.limiter` 按浏览器指纹拦非浏览器请求
+- **修复**：`deploy/searxng/settings.yml` 打开 `json` 并设 `limiter: false`；`AGENT_WEB_URL` 指向 SearXNG（宿主机 `http://localhost:8088`），不要写成 Mem0 的 8888
+- **相关**：`docker-compose.yml` 服务 `searxng`、`apps/api/src/modules/agents/tools/web-search.service.ts`

@@ -78,8 +78,31 @@ export enum MessageRole {
   SYSTEM = 'system',
 }
 
-/** 问题复杂度（LangGraph 路由结果） */
+/** 问题复杂度（LangGraph 路由结果，兼容旧客户端） */
 export enum Complexity {
   SIMPLE = 'simple',
   COMPLEX = 'complex',
+}
+
+/** Planner 五类意图（单选） */
+export enum AgentIntent {
+  CHITCHAT = 'chitchat',
+  PREFERENCE = 'preference',
+  KB = 'kb',
+  WEB = 'web',
+  KB_THEN_WEB = 'kb_then_web',
+}
+
+/** 评估节点结论 */
+export enum EvidenceGrade {
+  SUFFICIENT = 'sufficient',
+  REWRITE = 'rewrite',
+  GIVE_UP = 'give_up',
+}
+
+/** 白名单工具名 */
+export enum ToolName {
+  KB_RETRIEVE = 'kb_retrieve',
+  GRAPH_REASON = 'graph_reason',
+  WEB_SEARCH = 'web_search',
 }

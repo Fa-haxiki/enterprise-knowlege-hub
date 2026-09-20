@@ -17,6 +17,8 @@ const CONCURRENCY = parseInt(process.argv[2] ?? '50', 10);
 const REQUESTS_PER_USER = parseInt(process.argv[3] ?? '2', 10);
 
 const QUESTIONS = [
+  // 带 1 轮改写：空泛问法更容易触发 evaluate → rewrite（需 AGENT_ENABLE_LOOP=true）
+  '这个怎么规定的？',
   '差旅住宿一线城市每晚上限多少？',
   '出差交通费如何报销？',
   '员工请假审批流程是什么？',

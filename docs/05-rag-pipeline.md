@@ -1,80 +1,60 @@
 # 05 RAG 与 Agent 核心设计
 
-本文档是系统核心：入库管线（MinerU → 分块 → 双写索引 → 建图）与问答管线（LangGraph 状态机驱动的 0-9 步全链路）。
+本文档是系统核心：入库管线（MinerU → 分块 → 双写索引 → 建图）与问答管线（LangGraph 驱动的 Agentic RAG）。
+
+## 0. 目标图 vs 实现
+
+问答不再是单次 DAG。Planner 五类意图（闲聊 / 个人偏好 / 知识库 / 联网 / 知识库不足再联网）决定本轮工具；检索后 `evaluate` 可改写再检索或（仅 `kb_then_web`）转联网。闲聊与偏好不检索。计算器与代码执行不做。
+
+```
+acl_guard → load_window → query_rewrite → intent_router → memory_load
+  → 闲聊/偏好：think → prompt_build → llm_generate
+  → 其余：plan_or_act → execute_tools → evaluate ↺ rewrite / web → think → 作答
+```
+
+配置：`AGENT_ENABLE_LOOP`、`AGENT_MAX_ITERATIONS`、`AGENT_SIMPLE_FAST_PATH`、`AGENT_ENABLE_WEB`。会话创建仍在 Chat 层，不进入 LangGraph。
 
 ## 1. LangGraph 状态机
 
 ### 1.1 状态定义（AgentState）
 
-```typescript
-interface AgentState {
-  // 输入
-  query: string;                    // 用户原始问题
-  userId: string;
-  conversationId: string;
-  workspaceId?: string;             // 可选：限定空间
-  options: { enableGraph: boolean; enableTts: boolean; model?: string };
-
-  // 运行时
-  aclWhitelist: string[];           // step0: 可见空间集合
-  rewrittenQuery: string;           // 指代消解/改写后的问题
-  complexity: 'simple' | 'complex';
-  esHits: ChunkHit[];               // ES 召回
-  vectorHits: ChunkHit[];           // PGVector 召回
-  fusedChunks: ChunkHit[];          // RRF 融合后
-  rerankedChunks: ChunkHit[];       // Rerank 后 Top-6
-  graphTriples: Triple[];           // 图谱推理链路
-  shortTermMemory: string;          // Redis 窗口摘要
-  longTermMemory: string[];         // Mem0 记忆条目
-  finalPrompt: ChatMessage[];
-  answer: string;                   // 流式累积
-  citations: Citation[];
-
-  // 观测
-  nodeLatencies: Record<string, number>;
-  degraded: string[];               // 记录被降级的节点
-  error?: string;
-}
-```
+核心字段见 `apps/api/src/modules/agents/agent.state.ts`：`intent`（五类之一）、`suggestedQuery`、`availableTools` / `pendingTools`、`iteration`、`evidenceGrade`、`thinking`、`toolTrace[]`、`webHits`、`nodeLatencies: NodeLatency[]`（循环可重复）。
 
 ### 1.2 图结构（节点与边）
 
 ```mermaid
 flowchart TB
-    START --> aclNode["acl_guard<br/>权限白名单加载"]
-    aclNode --> rewriteNode["query_rewrite<br/>结合窗口摘要指代消解"]
-    rewriteNode --> routerNode{"complexity_router<br/>LLM 分类"}
-    routerNode -->|simple| retrieveNode["hybrid_retrieve<br/>ES + PGVector 并行"]
-    routerNode -->|complex| retrieveNode
-    retrieveNode --> fuseNode["rrf_fuse + rerank"]
-    fuseNode --> graphCheck{"complex 且<br/>enable_graph?"}
-    graphCheck -->|是| graphNode["graph_reason<br/>实体对齐 + 多跳 + 补召回"]
-    graphCheck -->|否| aclFilterNode
-    graphNode --> aclFilterNode["acl_filter<br/>分片级权限过滤"]
-    aclFilterNode --> memoryNode["memory_load<br/>Redis 窗口 + Mem0"]
-    memoryNode --> promptNode["prompt_build<br/>三段式上下文组装"]
-    promptNode --> genNode["llm_generate<br/>SSE 流式 + 引用标注"]
-    genNode --> persistNode["persist + langfuse_report"]
-    persistNode --> END
+    START --> aclNode["acl_guard"]
+    aclNode --> windowNode["load_window"]
+    windowNode --> rewriteNode["query_rewrite 指代消解"]
+    rewriteNode --> intentNode["intent_router Planner"]
+    intentNode --> memoryNode["memory_load"]
+    memoryNode -->|chitchat / preference| thinkNode
+    memoryNode -->|kb / web / kb_then_web| planNode["plan_or_act"]
+    planNode --> toolsNode["execute_tools"]
+    toolsNode --> evalNode["evaluate"]
+    evalNode -->|rewrite| rewrite2["rewrite_retrieve"]
+    rewrite2 --> planNode
+    evalNode -->|sufficient / give_up| thinkNode["think"]
+    thinkNode --> promptNode["prompt_build"]
+    promptNode --> genNode["llm_generate"]
+    genNode --> END
 ```
 
-- 实现：`@langchain/langgraph` 的 `StateGraph`，每个节点为 NestJS Provider 注入的方法
-- 节点超时：retrieve 800ms / rerank 500ms / graph 1500ms / memory 300ms，超时记 `degraded` 并继续
-- 全程单 Trace：状态机入口创建 LangFuse trace，各节点为 span
+- 实现：`@langchain/langgraph` 的 `StateGraph`；工具白名单 `kb_retrieve` / `graph_reason` / `web_search`
+- 节点超时记 `degraded` 并继续；全程单 Trace
+- 落库：`qa_records` 含 intent / thinking / tool_trace / step_trace，刷新后可回放时间线
 
-### 1.3 复杂度路由（complexity_router）
+### 1.3 意图路由（intent_router）
 
-用小参数模型（如 DeepSeek-V3 / Qwen2.5-7B）做二分类，Prompt 约束输出 JSON：
+小模型输出五类之一 + 建议检索词（失败默认 `kb`）：
 
-```text
-判断用户问题是否需要「多实体关联推理」。
-- simple：单一事实查询、制度条款、定义类。例："差旅住宿标准是多少"
-- complex：涉及 ≥2 个实体的关系/链路/对比/追溯。例："A项目的供应商还服务了哪些项目"
-只输出 {"complexity":"simple"|"complex"}
-```
+- `chitchat` / `preference`：不检索
+- `kb`：只挂知识库（关系类可挂图谱）
+- `web`：只挂联网（未开 `AGENT_ENABLE_WEB` 时降为 `kb`）
+- `kb_then_web`：先知识库，evaluate 不足再联网
 
-- 分类耗时预算 400ms；失败默认 `simple`
-- 路由结果通过 SSE `meta` 帧透传前端展示
+`web_search` 默认走自建 SearXNG（`GET /search?format=json`），映射为 `{title,url,snippet}`。`AGENT_WEB_PROVIDER=tavily` 可换官方 API。SearXNG 必须在 `settings.yml` 打开 `json` 格式并关闭 limiter，否则服务端 fetch 会 403。
 
 ## 2. 混合检索（hybrid_retrieve）
 

@@ -87,6 +87,7 @@ gantt
 
 ## 后续迭代（Backlog）
 
+- Agentic RAG：五类意图 Planner、评估–改写–再检索、可选联网、思考过程展示（见 [05-rag-pipeline.md](./05-rag-pipeline.md) §0）
 - SSO（OIDC/LDAP）、组织架构同步
 - 图谱维护台（实体合并、关系纠错）
 - **图谱实体类型演进**（封闭白名单的扩展 / 改名 / 合并，见下节）
