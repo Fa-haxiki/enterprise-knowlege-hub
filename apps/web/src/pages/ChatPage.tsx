@@ -357,6 +357,15 @@ export default function ChatPage() {
           intent: (u.intent as Message['intent']) ?? m.intent,
           thinking: u.thinking ?? m.thinking,
         })),
+      onConversationTitle: (id, title) => {
+        setConversations((prev) => {
+          const existing = prev.find((c) => c.id === id);
+          if (!existing) {
+            return [{ id, title, updated_at: new Date().toISOString() }, ...prev];
+          }
+          return prev.map((c) => (c.id === id ? { ...c, title } : c));
+        });
+      },
       onFinished: (result) => {
         update((m) => ({
           ...m,
@@ -369,7 +378,10 @@ export default function ChatPage() {
           const existing = prev.find((c) => c.id === result.conversation_id);
           const item: Conversation = {
             id: result.conversation_id,
-            title: existing?.title ?? result.title ?? '新对话',
+            title:
+              result.title && result.title !== '新对话'
+                ? result.title
+                : existing?.title ?? result.title ?? '新对话',
             updated_at: new Date().toISOString(),
           };
           return [item, ...prev.filter((c) => c.id !== result.conversation_id)];
@@ -474,6 +486,15 @@ export default function ChatPage() {
     if (!threadId) {
       threadId = crypto.randomUUID();
       skipMsgLoadRef.current = threadId;
+      const preview = query.trim();
+      setConversations((prev) => [
+        {
+          id: threadId!,
+          title: preview.length > 20 ? `${preview.slice(0, 20)}…` : preview || '新对话',
+          updated_at: new Date().toISOString(),
+        },
+        ...prev.filter((c) => c.id !== threadId),
+      ]);
       navigate(`/chat/${threadId}`, { replace: true });
     }
 

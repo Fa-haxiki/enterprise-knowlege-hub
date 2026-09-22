@@ -45,10 +45,13 @@ docker exec ekh-postgres-1 psql -U postgres -d "${POSTGRES_DB:-ekh}" -q -c \
      value text
    );' 2>/dev/null || echo "==> 警告：typeorm_metadata 自愈失败（可忽略，首次空库时正常）"
 
-# 3. dist 缺失时自动构建 API/Worker
-if [ ! -f apps/api/dist/main.js ] || [ ! -f apps/worker/dist/main.js ]; then
-  echo "==> dist 缺失，执行构建..."
-  pnpm -r --filter @ekh/api --filter @ekh/worker build
+# 3. 每次启动前编译 API，避免 node dist/main.js 跑到落后于源码的产物。
+#    Worker 仍仅在 dist 缺失时构建。
+echo "==> 编译 API..."
+pnpm --filter @ekh/api build
+if [ ! -f apps/worker/dist/main.js ]; then
+  echo "==> Worker dist 缺失，执行构建..."
+  pnpm --filter @ekh/worker build
 fi
 
 # 只检测 LISTEN 状态：lsof -ti :port 会匹配到本机出站连接（如微信连远端 8080），导致误判端口被占
