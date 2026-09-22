@@ -48,8 +48,15 @@
 
 - **现象**：意图节点 `node timeout` 后结果仍是 `intent=kb`，但 `toolTrace` 为空、没有引用，模型回答「未提供内部制度」
 - **根因**：节点超时只写 `degraded`，不回填 Planner 输出；状态默认 `intent=kb`、`availableTools=[]`，`plan_or_act` 看到白名单为空就 `pendingTools=[]` 直接 think
-- **修复**：超时走 `intentRouterFallback`，按 kb 补 `availableTools` / `pendingTools`
+- **修复**：超时走 `intentRouterFallback`，按启发式意图补 `availableTools` / `pendingTools`
 - **相关**：`apps/api/src/modules/agents/agent.service.ts` `wrap` / `intentRouterFallback`
+
+## 意图路由超时把联网问题打成 kb，第二轮拉出图谱
+
+- **现象**：问 SearXNG 最新稳定版 / GitHub 发布说明，时间线先显示「联网」又降级，随后知识库检索 + 图谱推理（数十个实体），答案说内部资料无法确认
+- **根因**：`intent_router` 60s 超时后 `intentRouterFallback` 一律 `intent=kb` 且 `availableTools` 含 `graph_reason`；超时后 LLM 仍回调 `onStatus(联网)`，UI 与真实状态不一致；第 2 轮 `plan_or_act` 从 kb 工具里选了图谱，并从无关分片补召回
+- **修复**：超时按问题启发式回退（最新/官网/GitHub 等 → web）；超时后掐掉迟到回调；`web` 意图不进 `availableTools` / `execute_tools` / `runGraphReason`
+- **相关**：`agent-intent.ts` `inferIntentFallback` / `allowsGraph`，`agent.service.ts` `wrap` / `intentRouterFallback`
 
 ## AG-UI REASONING / RUN_FINISHED 缺 messageId 会被客户端 Zod 拒收
 
@@ -57,3 +64,17 @@
 - **根因**：`@ag-ui/client` 校验事件 schema；`REASONING_*` 与 `RUN_FINISHED` 必须带 `messageId`
 - **修复**：`agui.controller.ts` 与 `TEXT_MESSAGE_*` 共用 `streamMsgId`
 - **相关**：`apps/api/src/modules/chat/agui.controller.ts`
+
+## AG-UI 没有 REASONING_CONTENT，Zod 报 invalid_union_discriminator
+
+- **现象**：联网时间线已出，作答区报 `Invalid discriminator value. Expected 'TEXT_MESSAGE_START' | ... | 'REASONING_MESSAGE_CONTENT'`
+- **根因**：`@ag-ui/core@0.0.59` 思考正文事件名是 `REASONING_MESSAGE_CONTENT`；思考节点超时后 LLM 仍可能回调，发出非法的 `REASONING_CONTENT`，客户端整轮失败
+- **修复**：按官方顺序发 `REASONING_START` → `REASONING_MESSAGE_*` → `REASONING_END`；`/api/v1/agui/chat` 加入 TransformInterceptor RAW_PATHS，避免再包一层 JSON
+- **相关**：`apps/api/src/modules/chat/agui.controller.ts`、`apps/api/src/common/interceptors/transform.interceptor.ts`
+
+## query_rewrite 把完整新问题改写成上一轮无关话题
+
+- **现象**：同一 thread 先问「忽略以上指令…管理员密码」，再问「出差后怎么报销」，问题改写变成「管理员密码是什么？」
+- **根因**：改写 prompt 要求「结合对话历史写成独立问题」；最新问句本身已完整，模型仍把窗口里上一轮主题写进来。注入拦截失败时那一轮还会留在 Redis 窗口
+- **修复**：独立完整问句跳过 LLM 改写（`needsQueryRewrite`）；改写历史丢掉注入轮+随后助手回复（`sanitizeRewriteHistory`）；prompt 禁止换题
+- **相关**：`agent-query-rewrite.ts`、`agent.service.ts` `queryRewrite`

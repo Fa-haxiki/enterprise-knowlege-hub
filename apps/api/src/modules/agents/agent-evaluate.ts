@@ -82,6 +82,13 @@ export function heuristicEvaluate(input: EvaluateInput): EvaluateResult {
 export function shouldTakeFastPath(input: EvaluateInput): boolean {
   if (!input.fastPathEnabled || !input.loopEnabled) return true;
   if (input.intent === AgentIntent.CHITCHAT || input.intent === AgentIntent.PREFERENCE) return true;
+  // 联网已有结果：不再改写、不再搜第二次
+  if (
+    (input.intent === AgentIntent.WEB || input.intent === AgentIntent.KB_THEN_WEB) &&
+    input.hasWeb
+  ) {
+    return true;
+  }
   if (input.intent !== AgentIntent.KB) return false;
   const top = input.chunks[0]?.rerank_score;
   return top != null && top >= input.minScore;

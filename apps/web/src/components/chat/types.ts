@@ -19,6 +19,7 @@ export interface Message {
   content: string;
   citations?: Citation[];
   feedback?: number;
+  feedbackComment?: string | null;
   streaming?: boolean;
   steps?: AgentStep[];
   triples?: Triple[];
@@ -66,6 +67,30 @@ export const STEP_LABELS: Record<string, string> = {
   prompt_build: '构建提示词',
   llm_generate: '生成回答',
 };
+
+/** 过程面板里出现的内部代号 → 中文 */
+export const TRACE_LABELS: Record<string, string> = {
+  ...STEP_LABELS,
+  ...INTENT_LABELS,
+  sufficient: '资料充分',
+  rewrite: '改写再检索',
+  give_up: '资料不足',
+  web_hits: '已有检索结果',
+  web_empty: '未检索到公开来源',
+  max_iterations: '已达检索轮次上限',
+  empty_recall: '知识库无召回',
+  low_score: '相关度不足',
+  kb_weak_need_web: '内部资料不足，需公开信息',
+  heuristic_ok: '资料充分',
+  loop_disabled: '未开启循环',
+  fast_path: '资料充分',
+};
+
+export function localizeTrace(value: string | undefined | null): string {
+  if (!value) return '';
+  if (TRACE_LABELS[value]) return TRACE_LABELS[value];
+  return value.replace(/[a-z][a-z0-9_]*/g, (token) => TRACE_LABELS[token] ?? token);
+}
 
 export function splitSentences(text: string): string[] {
   const raw = text.match(/[^。！？!?；;\n]+[。！？!?；;\n]?/g) ?? [];

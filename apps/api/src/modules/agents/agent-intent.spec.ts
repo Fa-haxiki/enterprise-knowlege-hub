@@ -1,6 +1,8 @@
 import { AgentIntent, Complexity, ToolName } from '@ekh/shared';
 import {
+  allowsGraph,
   complexityFromIntent,
+  inferIntentFallback,
   initialToolsForIntent,
   parseIntentJson,
   skipsRetrieve,
@@ -57,5 +59,38 @@ describe('complexityFromIntent', () => {
     expect(
       complexityFromIntent(AgentIntent.KB, [{ name: 'A' }, { name: 'B' }]),
     ).toBe(Complexity.COMPLEX);
+  });
+});
+
+describe('inferIntentFallback / allowsGraph', () => {
+  it('公开时效 / GitHub / 官方文档 → web', () => {
+    expect(
+      inferIntentFallback(
+        'SearXNG 最新稳定版发布说明改了什么？请查 GitHub 或官方文档。',
+        true,
+      ),
+    ).toBe(AgentIntent.WEB);
+  });
+
+  it('联网关闭时不降成 web', () => {
+    expect(inferIntentFallback('最新 GitHub release', false)).toBe(AgentIntent.KB);
+  });
+
+  it('寒暄 → chitchat', () => {
+    expect(inferIntentFallback('谢谢', true)).toBe(AgentIntent.CHITCHAT);
+  });
+
+  it('web 意图不挂图谱', () => {
+    expect(allowsGraph(AgentIntent.WEB)).toBe(false);
+    expect(toolsForIntent(AgentIntent.WEB, { webEnabled: true, enableGraph: true })).toEqual([
+      ToolName.WEB_SEARCH,
+    ]);
+    expect(
+      initialToolsForIntent(AgentIntent.WEB, {
+        webEnabled: true,
+        enableGraph: true,
+        wantGraph: true,
+      }),
+    ).toEqual([ToolName.WEB_SEARCH]);
   });
 });

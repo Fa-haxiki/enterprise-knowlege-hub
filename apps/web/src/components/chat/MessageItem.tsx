@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { api } from '@/lib/api';
 import DocPreviewModal, { type DocPreview } from '@/components/DocPreviewModal';
 import ExecutionTrace from './ExecutionTrace';
+import FeedbackDialog from './FeedbackDialog';
 import MarkdownBody from './MarkdownBody';
 import { INTENT_LABELS, type AgentIntent, type Message } from './types';
 
@@ -11,7 +12,7 @@ const GraphView = lazy(() => import('./GraphView'));
 interface Props {
   message: Message;
   playing: boolean;
-  onFeedback(m: Message, value: 1 | -1): void;
+  onFeedback(m: Message, value: 1 | -1, comment?: string): void;
   onSpeak(m: Message): void;
 }
 
@@ -129,37 +130,6 @@ function CitationPanel({ message }: { message: Message }) {
   );
 }
 
-function ThinkingPanel({ text, streaming }: { text: string; streaming?: boolean }) {
-  const [collapsed, setCollapsed] = useState(!streaming);
-  useEffect(() => {
-    setCollapsed(!streaming);
-  }, [streaming]);
-  if (!text) return null;
-  return (
-    <div className="mb-3 overflow-hidden rounded-xl border border-border/80 bg-subtle/40">
-      <button
-        type="button"
-        onClick={() => setCollapsed((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-xs font-medium text-ink-500"
-      >
-        思考过程
-        <svg
-          width="12"
-          height="12"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          className={`ml-auto transition-transform ${collapsed ? '' : 'rotate-180'}`}
-        >
-          <path d="m18 15-6-6-6 6" />
-        </svg>
-      </button>
-      {!collapsed && <div className="border-t border-border px-3 py-2 text-xs leading-5 text-ink-500 whitespace-pre-wrap">{text}</div>}
-    </div>
-  );
-}
-
 function showTrace(m: Message): boolean {
   if (m.intent === 'chitchat' || m.intent === 'preference') {
     const names = m.steps?.map((s) => s.name) ?? [];
@@ -170,11 +140,15 @@ function showTrace(m: Message): boolean {
 
 function IntentChip({ intent, suggestedQuery }: { intent: AgentIntent; suggestedQuery?: string }) {
   return (
-    <div className="mb-2 flex flex-wrap items-center gap-1.5">
-      <span className="inline-flex items-center rounded-full bg-brand-600/10 px-2 py-0.5 text-xs font-medium text-brand-600">
+    <div className="mb-2 flex min-w-0 items-center gap-1.5">
+      <span className="inline-flex shrink-0 whitespace-nowrap items-center rounded-full bg-brand-600/10 px-2 py-0.5 text-xs font-medium text-brand-600">
         {INTENT_LABELS[intent] ?? intent}
       </span>
-      {suggestedQuery && <span className="truncate text-[11px] text-ink-400">检索词：{suggestedQuery}</span>}
+      {suggestedQuery && (
+        <span className="min-w-0 truncate text-[11px] text-ink-400" title={suggestedQuery}>
+          检索词：{suggestedQuery}
+        </span>
+      )}
     </div>
   );
 }
@@ -261,6 +235,7 @@ function GraphPanel({ triples }: { triples: NonNullable<Message['triples']> }) {
 
 export default function MessageItem({ message: m, playing, onFeedback, onSpeak }: Props) {
   const [copied, setCopied] = useState(false);
+  const [feedbackValue, setFeedbackValue] = useState<1 | -1 | null>(null);
 
   const copyContent = async () => {
     try {
@@ -309,7 +284,6 @@ export default function MessageItem({ message: m, playing, onFeedback, onSpeak }
         )}
 
         {m.intent && <IntentChip intent={m.intent} suggestedQuery={m.suggestedQuery} />}
-        {m.thinking ? <ThinkingPanel text={m.thinking} streaming={m.streaming} /> : null}
 
         <MarkdownBody content={m.content} />
         {m.streaming && (
@@ -323,7 +297,8 @@ export default function MessageItem({ message: m, playing, onFeedback, onSpeak }
         {!m.streaming && m.content && (
           <div className="mt-3 flex items-center gap-1 border-t border-border pt-2 text-xs text-ink-400">
             <button
-              onClick={() => onFeedback(m, 1)}
+              onClick={() => setFeedbackValue(1)}
+              title={m.feedback === 1 && m.feedbackComment ? m.feedbackComment : '有用'}
               className={`flex items-center gap-1 rounded-md px-2 py-1 transition-colors hover:bg-subtle ${
                 m.feedback === 1 ? 'text-emerald-600' : ''
               }`}
@@ -334,7 +309,8 @@ export default function MessageItem({ message: m, playing, onFeedback, onSpeak }
               有用
             </button>
             <button
-              onClick={() => onFeedback(m, -1)}
+              onClick={() => setFeedbackValue(-1)}
+              title={m.feedback === -1 && m.feedbackComment ? m.feedbackComment : '无用'}
               className={`flex items-center gap-1 rounded-md px-2 py-1 transition-colors hover:bg-subtle ${
                 m.feedback === -1 ? 'text-red-500' : ''
               }`}
@@ -384,6 +360,18 @@ export default function MessageItem({ message: m, playing, onFeedback, onSpeak }
               {playing ? '停止' : '播放'}
             </button>
           </div>
+        )}
+
+        {feedbackValue != null && (
+          <FeedbackDialog
+            value={feedbackValue}
+            initialComment={m.feedback === feedbackValue ? (m.feedbackComment ?? '') : ''}
+            onCancel={() => setFeedbackValue(null)}
+            onSubmit={(comment) => {
+              onFeedback(m, feedbackValue, comment || undefined);
+              setFeedbackValue(null);
+            }}
+          />
         )}
       </div>
     </div>

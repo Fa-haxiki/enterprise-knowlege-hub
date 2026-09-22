@@ -78,7 +78,7 @@ export interface AgentCallbacks {
   onCitationsReset?(): void;
   onGraphPath(triples: Triple[]): void;
   onStepStart?(node: string): void;
-  onStepEnd?(node: string, latencyMs: number, degraded: boolean): void;
+  onStepEnd?(node: string, latencyMs: number, degraded: boolean, output?: Record<string, unknown>): void;
   onIntent?(intent: AgentIntent, suggestedQuery: string): void;
   onToolStart?(name: string, args?: Record<string, unknown>): void;
   onToolEnd?(name: string, summary?: string): void;

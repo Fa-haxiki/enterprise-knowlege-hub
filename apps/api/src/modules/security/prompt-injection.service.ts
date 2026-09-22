@@ -5,7 +5,10 @@ const INJECTION_PATTERNS: Array<{ name: string; re: RegExp }> = [
   // 指令覆盖
   { name: 'ignore_instructions', re: /ignore\s+(all|any|previous|above|prior)[\s\w]*instructions/i },
   { name: 'disregard_instructions', re: /disregard\s+(all|previous|the\s+above)/i },
-  { name: 'zh_ignore_instructions', re: /(忽略|无视|不要理会)(以上|之前|前面|上面|先前)(的)?(指令|指示|命令|要求|设定)/ },
+  {
+    name: 'zh_ignore_instructions',
+    re: /(忽略|无视|不要理会)(以上|之前|前面|上面|先前).{0,8}(指令|指示|命令|要求|设定)/,
+  },
   // 系统提示词提取
   { name: 'reveal_prompt', re: /(reveal|show|print|output|repeat)\s+(your|the)\s+(system\s+)?(prompt|instructions)/i },
   { name: 'zh_reveal_prompt', re: /(输出|打印|重复|告诉|展示).{0,6}(你的|你的初始)?(系统)?(提示词|指令|设定)/ },

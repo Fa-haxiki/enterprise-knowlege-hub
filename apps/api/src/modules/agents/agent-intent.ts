@@ -72,6 +72,23 @@ export function skipsRetrieve(intent: AgentIntent): boolean {
   return intent === AgentIntent.CHITCHAT || intent === AgentIntent.PREFERENCE;
 }
 
+const WEB_HINT =
+  /最新|官网|官方|github|gitlab|发布说明|发布[版注]|新闻|联网|公开信息|site:|https?:\/\/|www\.|release notes?|changelog|stable|docs\./i;
+const CHITCHAT_HINT = /^(你好|您好|谢谢|感谢|哈哈|嗯+|在吗)[！!。.?？\s]*$/u;
+
+/** 路由超时/解析失败时的轻量意图，避免把明显的公开时效问题打成 kb 再拉图谱 */
+export function inferIntentFallback(query: string, webEnabled: boolean): AgentIntent {
+  const q = query.trim();
+  if (!q) return AgentIntent.KB;
+  if (CHITCHAT_HINT.test(q)) return AgentIntent.CHITCHAT;
+  if (webEnabled && WEB_HINT.test(q)) return AgentIntent.WEB;
+  return AgentIntent.KB;
+}
+
+export function allowsGraph(intent: AgentIntent): boolean {
+  return intent === AgentIntent.KB || intent === AgentIntent.KB_THEN_WEB;
+}
+
 /** 本轮先执行的工具（kb_then_web 先只跑知识库） */
 export function initialToolsForIntent(
   intent: AgentIntent,

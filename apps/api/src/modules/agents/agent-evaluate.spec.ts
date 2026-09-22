@@ -51,6 +51,24 @@ describe('heuristicEvaluate', () => {
     expect(r.grade).toBe(EvidenceGrade.REWRITE);
     expect(r.reason).toBe('kb_weak_need_web');
   });
+
+  it('web 有结果 → sufficient，无结果才 rewrite', () => {
+    expect(
+      heuristicEvaluate({ ...base, intent: AgentIntent.WEB, hasWeb: true }).grade,
+    ).toBe(EvidenceGrade.SUFFICIENT);
+    expect(
+      heuristicEvaluate({ ...base, intent: AgentIntent.WEB, hasWeb: false, iteration: 0 }).grade,
+    ).toBe(EvidenceGrade.REWRITE);
+    expect(
+      heuristicEvaluate({
+        ...base,
+        intent: AgentIntent.WEB,
+        hasWeb: false,
+        iteration: 1,
+        maxIterations: 2,
+      }).grade,
+    ).toBe(EvidenceGrade.GIVE_UP);
+  });
 });
 
 describe('shouldTakeFastPath', () => {
@@ -68,6 +86,15 @@ describe('shouldTakeFastPath', () => {
   it('kb 低分不走快路径', () => {
     expect(
       shouldTakeFastPath({ ...base, intent: AgentIntent.KB, chunks: [{ rerank_score: 0.1 }] }),
+    ).toBe(false);
+  });
+
+  it('联网已有结果不再循环', () => {
+    expect(
+      shouldTakeFastPath({ ...base, intent: AgentIntent.WEB, hasWeb: true }),
+    ).toBe(true);
+    expect(
+      shouldTakeFastPath({ ...base, intent: AgentIntent.WEB, hasWeb: false }),
     ).toBe(false);
   });
 });

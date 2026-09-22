@@ -5,9 +5,10 @@ interface Props {
   autoSpeak: boolean;
   onToggleAutoSpeak(): void;
   onSend(query: string): void;
+  onStop(): void;
 }
 
-export default function ChatInput({ generating, autoSpeak, onToggleAutoSpeak, onSend }: Props) {
+export default function ChatInput({ generating, autoSpeak, onToggleAutoSpeak, onSend, onStop }: Props) {
   const [input, setInput] = useState('');
 
   const submit = (e: FormEvent) => {
@@ -52,21 +53,30 @@ export default function ChatInput({ generating, autoSpeak, onToggleAutoSpeak, on
           }}
           disabled={generating}
         />
-        <button
-          type="submit"
-          disabled={generating || !input.trim()}
-          className="flex items-center gap-1.5 rounded-xl bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-brand-700 disabled:opacity-40"
-        >
-          {generating ? (
-            <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-          ) : (
+        {generating ? (
+          <button
+            type="button"
+            onClick={onStop}
+            className="flex items-center gap-1.5 rounded-xl bg-ink-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-ink-700"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="6" y="6" width="12" height="12" rx="1.5" />
+            </svg>
+            停止
+          </button>
+        ) : (
+          <button
+            type="submit"
+            disabled={!input.trim()}
+            className="flex items-center gap-1.5 rounded-xl bg-brand-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-brand-700 disabled:opacity-40"
+          >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="m22 2-7 20-4-9-9-4Z" />
               <path d="M22 2 11 13" />
             </svg>
-          )}
-          发送
-        </button>
+            发送
+          </button>
+        )}
       </form>
     </div>
   );

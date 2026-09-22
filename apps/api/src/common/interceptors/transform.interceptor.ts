@@ -9,7 +9,7 @@ import { v4 as uuid } from 'uuid';
 import type { Request } from 'express';
 
 /** SSE / 流式端点不包裹统一响应包 */
-const RAW_PATHS = ['/api/v1/chat/completions'];
+const RAW_PATHS = ['/api/v1/agui/chat'];
 
 @Injectable()
 export class TransformInterceptor implements NestInterceptor {

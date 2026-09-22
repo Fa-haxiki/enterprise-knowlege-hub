@@ -20,6 +20,8 @@ export interface NodeLatency {
   latencyMs: number;
   iteration: number;
   degraded: boolean;
+  detail?: string;
+  output?: Record<string, unknown>;
 }
 
 /** 工具调用痕迹 */
@@ -30,6 +32,7 @@ export interface ToolTrace {
   latencyMs: number;
   iteration: number;
   degraded?: boolean;
+  output?: Record<string, unknown>;
 }
 
 export type { AgentIntent, EvidenceGrade, ToolName };

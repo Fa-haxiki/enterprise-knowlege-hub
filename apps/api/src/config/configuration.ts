@@ -94,7 +94,7 @@ export default () => ({
     chatRateLimitPerMin: parseInt(process.env.CHAT_RATE_LIMIT_PER_MIN ?? '20', 10),
   },
   agent: {
-    maxIterations: parseInt(process.env.AGENT_MAX_ITERATIONS ?? '3', 10),
+    maxIterations: parseInt(process.env.AGENT_MAX_ITERATIONS ?? '2', 10),
     enableLoop: process.env.AGENT_ENABLE_LOOP !== 'false',
     enableWeb: process.env.AGENT_ENABLE_WEB === 'true',
     simpleFastPath: process.env.AGENT_SIMPLE_FAST_PATH !== 'false',

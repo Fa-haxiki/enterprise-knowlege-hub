@@ -15,6 +15,7 @@ export function asLatency(
   latencyMs: number,
   iteration = 0,
   degraded = false,
+  extra?: { detail?: string; output?: Record<string, unknown> },
 ): NodeLatency[] {
-  return [{ name, latencyMs, iteration, degraded }];
+  return [{ name, latencyMs, iteration, degraded, ...extra }];
 }
