@@ -184,8 +184,23 @@ export class AguiController {
     let partialAnswer = '';
     const snapshot = new RunSnapshot();
     let runStatus: 'done' | 'aborted' = 'done';
+    // 标题与回答并行。在 RUN_STARTED 之后再挂回调，避免标题事件抢在首帧之前。
+    let titleReady: Promise<string> | null = null;
     try {
       send({ type: 'RUN_STARTED', threadId, runId });
+
+      titleReady = titlePromise
+        ? titlePromise.then(async (generated) => {
+            title = generated;
+            await this.chat.rename(user.userId, threadId, generated);
+            send({
+              type: 'CUSTOM',
+              name: 'conversation_title',
+              value: { conversation_id: threadId, title: generated },
+            });
+            return generated;
+          })
+        : null;
 
       // 跑完整条 Agent：回调把检索、步骤、token、引用等实时转成 AG-UI 事件
       const { state: result, traceId } = await this.agent.run(
@@ -255,10 +270,9 @@ export class AguiController {
       );
       if (textStarted) send({ type: 'TEXT_MESSAGE_END', messageId: streamMsgId });
 
-      // 标题生成与问答并行，此处只需等剩余时间（通常已完成）
-      if (titlePromise) {
-        title = await titlePromise;
-        await this.chat.rename(user.userId, conv.id, title);
+      // 回答先结束时，把标题事件补齐后再发 RUN_FINISHED
+      if (titleReady) {
+        title = await titleReady;
       }
 
       const latencyMs = Date.now() - t0;
@@ -332,11 +346,9 @@ export class AguiController {
         result.webHits.map((h) => `${h.title} ${h.url}`.trim()).filter(Boolean),
       );
     } catch (e) {
-      // 问答失败也要把已生成的标题落库，避免新会话停留在默认标题
-      if (titlePromise) {
-        void titlePromise
-          .then((t) => this.chat.rename(user.userId, conv.id, t))
-          .catch(() => undefined);
+      // 问答失败也要等标题落库，避免新会话停留在默认标题
+      if (titleReady) {
+        title = await titleReady.catch(() => title);
       }
       const errMsg = (e as Error).message || '';
       const aborted = abort.signal.aborted || /abort|BodyStreamBuffer/i.test(errMsg);

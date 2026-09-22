@@ -1,0 +1,22 @@
+---
+description: 启动项目前必须先编译 API，禁止直接跑过期的 dist
+alwaysApply: true
+---
+
+# 启动前编译 API
+
+本地 API 由 `node apps/api/dist/main.js` 启动，不会读取 `src/`。源码已改但 `dist` 未重新编译时，运行中的仍是旧逻辑（例如 AG-UI 思考事件仍发 `REASONING_CONTENT`，前端 Zod 报 `Invalid discriminator value`）。
+
+## 要求
+
+每次启动或重启项目之前，先编译 API，再拉起进程：
+
+```bash
+pnpm --filter @ekh/api build
+```
+
+适用入口：`pnpm dev:up`、`pnpm dev:api`、`node apps/api/dist/main.js`，以及在 Windows 上手动拉起 API。`scripts/dev-up.sh` 已在启动 API 前执行该编译。
+
+- API 已在跑、又改了 `apps/api/src`：先编译，再重启 API，让新 `dist` 生效
+- 只改前端或文档、不启动 API：不必为此编译
+- 编译失败则不要启动 API

@@ -51,6 +51,7 @@ export interface AguiHandlers {
   onGraphPath(triples: Triple[]): void;
   onUsage(u: UsageInfo): void;
   onIntent?(intent: string, suggestedQuery: string): void;
+  onConversationTitle?(conversationId: string, title: string): void;
   onToolStart?(name: string): void;
   onToolEnd?(name: string, summary?: string): void;
   onThinking?(text: string): void;
@@ -128,6 +129,9 @@ export function dispatchAguiEvent(event: AguiEvent, h: AguiHandlers) {
         h.onIntent?.(v.intent, v.suggestedQuery);
       } else if (event.name === 'think' && typeof event.value === 'string') {
         h.onThinking?.(event.value);
+      } else if (event.name === 'conversation_title') {
+        const v = event.value as { conversation_id?: string; title?: string };
+        if (v?.conversation_id && v.title) h.onConversationTitle?.(v.conversation_id, v.title);
       }
       break;
     case EventType.RUN_FINISHED:

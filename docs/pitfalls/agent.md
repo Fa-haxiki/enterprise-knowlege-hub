@@ -72,6 +72,13 @@
 - **修复**：按官方顺序发 `REASONING_START` → `REASONING_MESSAGE_*` → `REASONING_END`；`/api/v1/agui/chat` 加入 TransformInterceptor RAW_PATHS，避免再包一层 JSON
 - **相关**：`apps/api/src/modules/chat/agui.controller.ts`、`apps/api/src/common/interceptors/transform.interceptor.ts`
 
+## 源码已改但 node dist 仍发 REASONING_CONTENT
+
+- **现象**：时间线走到「思考」后作答区同样报 `Invalid discriminator value...REASONING_MESSAGE_CONTENT`，思考步骤停在「已停止」，检索和图谱卡片仍在
+- **根因**：本地用 `node dist/main.js` 启动，`dist/main.js` 里 `onThinking` 仍是 `REASONING_CONTENT`；源码已改成 `REASONING_MESSAGE_*` 但没有重新 build
+- **修复**：`pnpm --filter @ekh/api build` 后重启 API（改 `.env` 的 `ES_NODE` 时一并带上）
+- **相关**：`apps/api/dist/main.js`、`apps/api/src/modules/chat/agui.controller.ts`
+
 ## query_rewrite 把完整新问题改写成上一轮无关话题
 
 - **现象**：同一 thread 先问「忽略以上指令…管理员密码」，再问「出差后怎么报销」，问题改写变成「管理员密码是什么？」

@@ -48,6 +48,11 @@ interface DocGroup {
   chunks: ChunkHit[];
 }
 
+/** 正文没有高亮、只因文档标题命中的分片，不在段落列表里再展示 */
+function isTitleOnlyHit(hit: ChunkHit): boolean {
+  return hit.highlights.length === 0;
+}
+
 /** 同一文档的分片收成一组，组内按相关度降序，文档按综合分排序 */
 function groupHitsByDocument(hits: ChunkHit[]): DocGroup[] {
   const map = new Map<string, DocGroup>();
@@ -174,6 +179,7 @@ export default function SearchPage() {
 
   const groups = useMemo(() => groupHitsByDocument(hits), [hits]);
   const maxScore = hits[0]?.score ?? 0;
+  const paragraphCount = hits.filter((h) => !isTitleOnlyHit(h)).length;
 
   const openDocument = async (documentId: string) => {
     try {
@@ -295,12 +301,14 @@ export default function SearchPage() {
 
           {!searching && searched && hits.length > 0 && (
             <p className="text-xs text-ink-400">
-              共 {groups.length} 篇文档 · {hits.length} 个命中段落
+              共 {groups.length} 篇文档 · {paragraphCount} 个命中段落
             </p>
           )}
 
           {!searching &&
-            groups.map((group) => (
+            groups.map((group) => {
+              const bodyChunks = group.chunks.filter((c) => !isTitleOnlyHit(c));
+              return (
               <div
                 key={group.document_id}
                 className="overflow-hidden rounded-card border border-border bg-card shadow-card"
@@ -316,9 +324,9 @@ export default function SearchPage() {
                       ? group.title_highlights.map((t, i) => <HighlightedText key={i} text={t} />)
                       : `《${group.title}》`}
                   </span>
-                  {group.chunks.length > 1 && (
+                  {bodyChunks.length > 1 && (
                     <span className="shrink-0 rounded-full bg-subtle px-1.5 py-0.5 text-[10px] text-ink-400">
-                      {group.chunks.length} 个段落
+                      {bodyChunks.length} 个段落
                     </span>
                   )}
                   <ScoreLabel
@@ -331,8 +339,9 @@ export default function SearchPage() {
                     </svg>
                   </span>
                 </button>
+                {bodyChunks.length > 0 && (
                 <div className="border-t border-border/70">
-                  {group.chunks.map((hit) => {
+                  {bodyChunks.map((hit) => {
                     const heading = hit.heading_path.filter(Boolean).join(' / ');
                     return (
                       <button
@@ -347,13 +356,7 @@ export default function SearchPage() {
                             <div className="truncate text-[11px] text-ink-400">{heading}</div>
                           ) : null}
                           <p className="mt-0.5 line-clamp-3 text-xs leading-6 text-ink-600">
-                            {hit.highlights.length > 0 ? (
-                              <>
-                                …<HighlightedText text={hit.highlights[0]} />…
-                              </>
-                            ) : (
-                              <span className="text-ink-400">命中在文档标题</span>
-                            )}
+                            …<HighlightedText text={hit.highlights[0]} />…
                           </p>
                         </div>
                         <ScoreLabel percent={relevancePercent(hit.score, maxScore)} />
@@ -362,8 +365,10 @@ export default function SearchPage() {
                     );
                   })}
                 </div>
+                )}
               </div>
-            ))}
+              );
+            })}
         </div>
       </div>
 

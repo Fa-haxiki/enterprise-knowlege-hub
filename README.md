@@ -113,7 +113,7 @@ pnpm seed:admin   # 账号见 .env 的 ADMIN_EMAIL / ADMIN_PASSWORD
 pnpm dev:down
 ```
 
-`dev:up` 自动完成：docker compose 全组件启动 → 等待 PG/ES/Neo4j 就绪 → dist 缺失时自动构建 → 后台拉起 API/Worker/Web。日志在 `logs/{api,worker,web}.log`，已运行的服务自动跳过。
+`dev:up` 自动完成：docker compose 全组件启动 → 等待 PG/ES/Neo4j 就绪 → 每次先编译 API（Worker 仅在 dist 缺失时构建）→ 后台拉起 API/Worker/Web。日志在 `logs/{api,worker,web}.log`，已运行的服务自动跳过。
 
 如需前台调试单个服务，仍可分别使用 `pnpm dev:api` / `pnpm dev:worker` / `pnpm dev:web`。
 
