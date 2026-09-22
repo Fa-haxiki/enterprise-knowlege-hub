@@ -36,6 +36,13 @@
 - **修复**：用局部变量 `let fullContent` 在 token 事件中同步累积，done 时读局部变量
 - **相关**：`apps/web/src/pages/ChatPage.tsx` send()
 
+## 手动停止后最后一步一直转圈，正文出现 BodyStreamBuffer was aborted
+
+- **现象**：点停止后「改写再检索」等步骤仍转圈，作答区写出 `BodyStreamBuffer was aborted` 或「已停止生成」
+- **根因**：`abortRun()` 先掐断 fetch，SSE 的 `STEP_FINISHED` 到不了前端，步骤停在 `running`；`@ag-ui/client` 把 Abort 收成 `RUN_ERROR`，`onError` 用 `formatChatError` 写进 content
+- **修复**：停止时本地把 running 步标 done；`isChatAbortError` 命中则不写正文；后端 abort 不发 `RUN_ERROR`；`wrap` 遇到 abort 结束当前步并中断图
+- **相关**：`ChatPage.tsx` `finishStopped`、`agui.ts` `isChatAbortError`、`ExecutionTrace.tsx`、`agui.controller.ts`、`agent.service.ts` wrap
+
 ## tailwind.config.js 变更后 dev server 不生效
 
 - **现象**：新增自定义颜色（如 `bg-surface`）后 vite dev server 报 `The 'bg-surface' class does not exist`，但 `pnpm build` 正常

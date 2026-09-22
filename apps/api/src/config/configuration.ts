@@ -93,6 +93,17 @@ export default () => ({
     aclCacheTtlSeconds: parseInt(process.env.ACL_CACHE_TTL_SECONDS ?? '600', 10),
     chatRateLimitPerMin: parseInt(process.env.CHAT_RATE_LIMIT_PER_MIN ?? '20', 10),
   },
+  agent: {
+    maxIterations: parseInt(process.env.AGENT_MAX_ITERATIONS ?? '2', 10),
+    enableLoop: process.env.AGENT_ENABLE_LOOP !== 'false',
+    enableWeb: process.env.AGENT_ENABLE_WEB === 'true',
+    simpleFastPath: process.env.AGENT_SIMPLE_FAST_PATH !== 'false',
+    webProvider: process.env.AGENT_WEB_PROVIDER ?? 'searxng',
+    webUrl: process.env.AGENT_WEB_URL ?? 'http://localhost:8088',
+    webApiKey: process.env.AGENT_WEB_API_KEY ?? '',
+    webTimeoutMs: parseInt(process.env.AGENT_WEB_TIMEOUT_MS ?? '10000', 10),
+    webMaxResults: parseInt(process.env.AGENT_WEB_MAX_RESULTS ?? '5', 10),
+  },
   security: {
     // Prompt 注入检测：命中后拒绝进入 LLM 链路
     injectionBlockEnabled: process.env.PROMPT_INJECTION_BLOCK !== 'false',

@@ -60,5 +60,15 @@
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.6.3",
     "webpack-node-externals": "^3.0.0"
+  },
+  "jest": {
+    "moduleFileExtensions": ["js", "json", "ts"],
+    "rootDir": "src",
+    "testRegex": ".*\\.spec\\.ts$",
+    "transform": { "^.+\\.ts$": "ts-jest" },
+    "testEnvironment": "node",
+    "moduleNameMapper": {
+      "^@ekh/shared$": "<rootDir>/../../../packages/shared/src/index.ts"
+    }
   }
 }

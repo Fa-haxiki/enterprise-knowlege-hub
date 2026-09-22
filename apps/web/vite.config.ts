@@ -15,6 +15,8 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:8080',
         changeOrigin: true,
+        timeout: 0,
+        proxyTimeout: 0,
       },
       // socket.io 握手端点（namespace 在协议层区分，URL 均为 /socket.io）
       '/socket.io': {

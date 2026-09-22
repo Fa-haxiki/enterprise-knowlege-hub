@@ -4,10 +4,11 @@ import { WorkspacesModule } from '../workspaces/workspaces.module';
 import { RetrievalModule } from '../retrieval/retrieval.module';
 import { MemoryModule } from '../memory/memory.module';
 import { GraphModule } from '../graph/graph.module';
+import { WebSearchService } from './tools/web-search.service';
 
 @Module({
   imports: [WorkspacesModule, RetrievalModule, MemoryModule, GraphModule],
-  providers: [AgentService],
+  providers: [AgentService, WebSearchService],
   exports: [AgentService],
 })
 export class AgentsModule {}

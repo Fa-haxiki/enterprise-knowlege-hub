@@ -6,6 +6,7 @@ import type { ChunkHit } from '@ekh/shared';
 import { EmbeddingService } from '../llm/embedding.service';
 import { RerankerService } from '../llm/reranker.service';
 import { EsService } from './es.service';
+import { filterChunksByAcl } from '../agents/agent-acl';
 
 export interface RetrieveResult {
   chunks: ChunkHit[];
@@ -78,8 +79,7 @@ export class RetrievalService {
     reranked = await this.expandToParents(reranked);
 
     // ---- 结果级 ACL 兜底过滤 ----
-    const allowed = new Set(aclWhitelist);
-    const filtered = reranked.filter((c) => allowed.has(c.workspace_id));
+    const filtered = filterChunksByAcl(reranked, aclWhitelist);
     const stripped = reranked.length - filtered.length;
     if (stripped > 0) {
       this.logger.warn(`acl_filter stripped ${stripped} chunks`);

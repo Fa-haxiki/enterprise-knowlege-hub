@@ -30,6 +30,7 @@ flowchart LR
         Redis[("Redis")]
         MinIO[("MinIO")]
         Mem0SVC["Mem0"]
+        SearXNG["SearXNG"]
     end
 
     subgraph ai [AI 服务]
@@ -46,6 +47,7 @@ flowchart LR
     Ctrl --> AgentRT --> Modules
     Modules --> PG & ES & Neo4j & Redis & Mem0SVC
     AgentRT --> LLM & Embed & Rerank
+    AgentRT -->|web_search| SearXNG
     Ctrl -->|任务入队| Redis
     Redis --> ParseJob --> MinerU
     ParseJob --> EmbedJob --> GraphJob
@@ -58,29 +60,20 @@ flowchart LR
 
 ## 2. Agent 问答全链路（核心流程）
 
-对应需求步骤 0-9，下图为 LangGraph 状态机视角的完整链路：
+会话在 Chat 层建/续；LangGraph 负责意图、工具、评估循环与生成。详见 [05-rag-pipeline.md](./05-rag-pipeline.md) §0。
 
 ```mermaid
 flowchart TB
-    Start["0. 用户提问<br/>POST /api/v1/chat/completions"] --> Auth["鉴权校验<br/>JWT 验证 + Redis 权限白名单<br/>未命中则回源 PG 并回填"]
-    Auth --> Router{"1. LangGraph 复杂度路由<br/>LLM 分类器: simple / complex"}
-    Router -->|simple| Hybrid["2a. 混合检索<br/>ES BM25 + PGVector 余弦"]
-    Router -->|complex| Hybrid2["2b. 混合检索<br/>同左"]
-    Hybrid --> RRF["RRF 融合打分<br/>score = Σ 1/(k+rank)"]
-    Hybrid2 --> RRF
-    RRF --> Rerank["Reranker 精排 Top-N"]
-    Rerank --> Graph{"是否 complex?"}
-    Graph -->|是| Entity["3. LLM 实体抽取<br/>→ Neo4j 多跳 Cypher<br/>→ 推理链路 triples"]
-    Graph -->|否| ACL
-    Entity --> ACL["4. 权限过滤<br/>剔除无权限文档分片<br/>workspace_id IN 白名单"]
-    ACL --> Memory["5. 记忆装配<br/>Redis 滑动窗口摘要<br/>+ Mem0 长期记忆"]
-    Memory --> Prompt["6. Prompt 统一组装<br/>分片 + 图谱链路 + 分层记忆"]
-    Prompt --> Gen["7. LLM 流式生成<br/>SSE 推送 token/citation"]
-    Gen --> TTSOpt{"用户开启语音?"}
-    TTSOpt -->|是| TTSNode["TTS 分句合成<br/>WebSocket 推送音频帧"]
-    TTSOpt -->|否| Trace
-    TTSNode --> Trace["8. LangFuse 上报<br/>耗时/Token/召回/异常"]
-    Trace --> Persist["9. 问答记录持久化<br/>messages + qa_records"]
+    Start["用户提问"] --> Auth["鉴权 + ACL 白名单"]
+    Auth --> Intent{"intent_router 五类意图"}
+    Intent -->|chitchat / preference| Think
+    Intent -->|kb / web / kb_then_web| Memory["memory_load"]
+    Memory --> Loop["plan_or_act + execute_tools"]
+    Loop --> Eval{"evaluate"}
+    Eval -->|rewrite| Loop
+    Eval -->|够了 / 放弃| Think["think"]
+    Think --> Gen["llm_generate 流式作答"]
+    Gen --> Persist["messages + qa_records + Mem0"]
     Persist --> EndNode["结束"]
 ```
 
@@ -88,18 +81,16 @@ flowchart TB
 
 | 步骤 | 组件 | 说明 | 降级策略 |
 | --- | --- | --- | --- |
-| 0 | AuthModule | JWT 校验；`acl:whitelist:{userId}` 缓存用户可见空间集合，TTL 10min | 缓存失效回源 PG |
-| 1 | LangGraph Router 节点 | 小模型分类（问题是否需多实体关联推理），输出 simple/complex | 分类失败默认 simple |
-| 2 | RetrievalModule | ES `multi_match`(IK 分词) + PGVector `<=>` 余弦，各召回 Top-20 | 单引擎故障退化为单路 |
-| - | Fusion | RRF（k=60）融合，Reranker 精排取 Top-6 | Reranker 超时用 RRF 分 |
-| 3 | GraphModule | LLM 抽取实体 → 参数化 Cypher 多跳（≤3 跳）→ triples + 路径 | Neo4j 故障跳过，标注降级 |
-| 4 | AclFilter | 按 `chunk.workspace_id` 与用户白名单求交，越权分片剔除 | 不过滤视为事故，强制开启 |
-| 5 | MemoryModule | Redis `chat:win:{convId}` 取窗口摘要；Mem0 `search(user_id, query)` 取长期记忆 | 任一失败则省略该层 |
-| 6 | PromptBuilder | 三段式上下文：检索分片（带 ref_id）/ 图谱 triples / 记忆 | - |
-| 7 | ChatModule | LLM stream → SSE；要求引用 `[ref_id]` 标注 | LLM 故障返回友好错误 |
-| - | TTS | 按句切分合成，WS 推送 `audio_chunk` | TTS 故障仅关闭语音 |
-| 8 | ObservabilityModule | LangFuse Trace：span 覆盖各节点，记录耗时、usage、召回 IDs | 上报异步，不阻塞 |
-| 9 | ChatModule | messages 落库；qa_records 记录召回/推理/耗时快照 | - |
+| 0 | AuthModule | JWT 校验；`acl:whitelist:{userId}` 缓存用户可见空间集合 | 缓存失效回源 PG |
+| 1 | intent_router | 五类意图 + 建议检索词；闲聊/偏好不检索 | 分类失败默认 kb |
+| 2 | execute_tools | `kb_retrieve` / `graph_reason` / `web_search`（SearXNG JSON） | 单工具失败记 degraded |
+| 3 | evaluate | 资料是否足够；可改写再检索或 kb_then_web 转联网 | LLM 失败用启发式；达上限 give_up |
+| 4 | AclFilter | 工具返回与 Prompt 前再滤 workspace 白名单 | 不过滤视为事故 |
+| 5 | MemoryModule | Redis 窗口 + Mem0；可写入本轮外部事实 | 失败省略该层 |
+| 6 | think + PromptBuilder | 可空思考摘要 + 分片/图谱/外链/记忆 | 思考失败则空 |
+| 7 | ChatModule | 流式作答 + `[n]` 引用（内部/外链分区） | LLM 故障友好错误 |
+| 8 | ObservabilityModule | LangFuse span；qa_records 含 step_trace / thinking | 上报不阻塞 |
+| 9 | ChatModule | 消息落库 + 历史回放时间线 | - |
 
 ## 3. 文档入库链路
 
