@@ -57,10 +57,11 @@ export class LlmService {
   /** 非流式调用（含 token 用量）：供 LangFuse generation 埋点使用 */
   async invokeWithUsage(
     messages: BaseMessage[],
-    options?: { model?: string; temperature?: number; timeout?: number },
+    options?: { model?: string; temperature?: number; timeout?: number; signal?: AbortSignal },
   ): Promise<{ text: string; usage: ChatUsage }> {
     const model = this.createChatModel(options);
-    const res = await model.invoke(this.maskMessages(messages));
+    // 把停止信号交给模型请求，用户点停止时这一次调用会中断，而不是等它自己返回
+    const res = await model.invoke(this.maskMessages(messages), { signal: options?.signal });
     const text = typeof res.content === 'string' ? res.content : JSON.stringify(res.content);
     const u = res.usage_metadata;
     return {
@@ -73,13 +74,13 @@ export class LlmService {
    * 流式调用：返回 token 迭代器与共享 usage 对象。
    * usage 在迭代过程中被填充，迭代结束后读取即为最终值。
    */
-  streamChat(messages: BaseMessage[], options?: { model?: string }) {
+  streamChat(messages: BaseMessage[], options?: { model?: string; signal?: AbortSignal }) {
     const usage: ChatUsage = { prompt_tokens: 0, completion_tokens: 0 };
     const model = this.createChatModel({ ...options, streaming: true });
     const maskedMessages = this.maskMessages(messages);
 
     const iterator = (async function* () {
-      const stream = await model.stream(maskedMessages);
+      const stream = await model.stream(maskedMessages, { signal: options?.signal });
       for await (const chunk of stream) {
         const delta = typeof chunk.content === 'string' ? chunk.content : '';
         if (delta) yield delta;
@@ -100,7 +101,7 @@ export class LlmService {
   async invokeWithTools(
     messages: BaseMessage[],
     tools: { name: string; description: string; schema?: Record<string, unknown> }[],
-    options?: { model?: string; temperature?: number; timeout?: number },
+    options?: { model?: string; temperature?: number; timeout?: number; signal?: AbortSignal },
   ): Promise<{
     text: string;
     toolCalls: { name: string; args: Record<string, unknown> }[];
@@ -116,7 +117,7 @@ export class LlmService {
       },
     }));
     const model = base.bindTools(openaiTools);
-    const res = await model.invoke(this.maskMessages(messages));
+    const res = await model.invoke(this.maskMessages(messages), { signal: options?.signal });
     const text = typeof res.content === 'string' ? res.content : '';
     const u = res.usage_metadata;
     const toolCalls = (res.tool_calls ?? []).map((c) => ({
