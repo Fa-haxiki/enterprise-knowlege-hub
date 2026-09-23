@@ -268,6 +268,8 @@ export class AguiController {
         },
         abort.signal,
       );
+      // 图在停止之后仍返回了完整状态时，不能按成功落库，改走下面的快照
+      if (abort.signal.aborted) throw new Error('aborted');
       if (textStarted) send({ type: 'TEXT_MESSAGE_END', messageId: streamMsgId });
 
       // 回答先结束时，把标题事件补齐后再发 RUN_FINISHED

@@ -41,6 +41,12 @@ function isAbortLike(e: unknown): boolean {
   return name === 'AbortError' || /abort|BodyStreamBuffer/i.test(msg);
 }
 
+function abortedError(): Error {
+  const err = new Error('aborted');
+  err.name = 'AbortError';
+  return err;
+}
+
 const RELATION_TYPE_SET = new Set<string>(GRAPH_RELATION_TYPES);
 
 const NODE_TIMEOUT_MS = 60_000;
@@ -184,15 +190,22 @@ export class AgentService {
           callbacks: this.gatedCallbacks(rawCb, () => gate.live),
         },
       };
-      if (this.signalOf(config)?.aborted) {
-        throw new Error('aborted');
+      const signal = this.signalOf(config);
+      // 这一步还没开始就已经停了，直接抛出，避免再记一条成功步骤
+      if (signal?.aborted) {
+        throw abortedError();
       }
+      // 停止后立刻摘掉回调，避免模型请求还在收尾时继续往前端推 token
+      const onAbort = () => {
+        gate.live = false;
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
       rawCb?.onStepStart?.(name);
       const span = this.langfuse.createSpan(this.traceOf(config), name, this.spanInput(name, state));
       try {
-        const result = timeout
-          ? await this.withTimeout(fn(state, innerConfig), timeout)
-          : await fn(state, innerConfig);
+        const work = fn(state, innerConfig);
+        // 用户点停止时不要等这一步自己跑完：等完会正常返回，外层就会按整轮成功落库
+        const result = await this.raceSignal(timeout ? this.withTimeout(work, timeout) : work, signal);
         const output = buildNodeOutput(name, { ...state, ...result });
         this.langfuse.endSpan(span, { ...this.spanOutput(name, result), ...output });
         const latency = Date.now() - t0;
@@ -214,7 +227,7 @@ export class AgentService {
         const aborted = isAbortLike(e) || this.signalOf(config)?.aborted;
         rawCb?.onStepEnd?.(name, Date.now() - t0, true, aborted ? { summary: '已停止' } : undefined);
         if (aborted) {
-          throw e instanceof Error ? e : new Error('aborted');
+          throw isAbortLike(e) && e instanceof Error ? e : abortedError();
         }
         this.logger.warn(`node ${name} degraded: ${(e as Error).message}`);
         const fallback = name === 'intent_router' ? this.intentRouterFallback(state, rawCb) : {};
@@ -223,6 +236,8 @@ export class AgentService {
           degraded: [name],
           nodeLatencies: asLatency(name, Date.now() - t0, iteration, true),
         };
+      } finally {
+        signal?.removeEventListener('abort', onAbort);
       }
     };
   }
@@ -333,6 +348,39 @@ export class AgentService {
     return config.signal ?? (config.configurable as { signal?: AbortSignal } | undefined)?.signal;
   }
 
+  /** 停止后立刻失败，避免这一步正常返回后图继续往下走 */
+  private throwIfAborted(config: RunnableConfig) {
+    if (this.signalOf(config)?.aborted) throw abortedError();
+  }
+
+  /**
+   * 用户点停止时不等待进行中的请求结束。
+   * 节点自己返回成功的话，LangGraph 会调度下一步，控制器就会按整轮跑完落库。
+   */
+  private raceSignal<T>(work: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return work;
+    if (signal.aborted) return Promise.reject(abortedError());
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => {
+        signal.removeEventListener('abort', onAbort);
+        reject(abortedError());
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      work.then(
+        (value) => {
+          signal.removeEventListener('abort', onAbort);
+          // 返回的同一瞬间如果已经停了，仍按中止处理，不能把结果交给下一步
+          if (signal.aborted) reject(abortedError());
+          else resolve(value);
+        },
+        (err) => {
+          signal.removeEventListener('abort', onAbort);
+          reject(err);
+        },
+      );
+    });
+  }
+
   private async trackedInvoke(
     config: RunnableConfig,
     name: string,
@@ -349,7 +397,10 @@ export class AgentService {
       })),
     });
     try {
-      const { text, usage } = await this.llm.invokeWithUsage(messages, options);
+      const { text, usage } = await this.llm.invokeWithUsage(messages, {
+        ...options,
+        signal: this.signalOf(config),
+      });
       this.langfuse.endGeneration(generation, { output: text.slice(0, 2000), usage });
       return text;
     } catch (e) {
@@ -446,7 +497,11 @@ export class AgentService {
       model: model ?? 'unknown',
       input: messages.map((m) => ({ role: m._getType(), content: String(m.content).slice(0, 2000) })),
     });
-    const { text, usage } = await this.llm.invokeWithUsage(messages, { model, temperature: 0 });
+    const { text, usage } = await this.llm.invokeWithUsage(messages, {
+      model,
+      temperature: 0,
+      signal: this.signalOf(config),
+    });
     this.langfuse.endGeneration(generation, { output: text.slice(0, 2000), usage });
     return { rewrittenQuery: text.trim() || state.query };
   }
@@ -476,7 +531,11 @@ export class AgentService {
       model: model ?? 'unknown',
       input: messages.map((m) => ({ role: m._getType(), content: String(m.content).slice(0, 2000) })),
     });
-    const { text: raw, usage } = await this.llm.invokeWithUsage(messages, { model, temperature: 0 });
+    const { text: raw, usage } = await this.llm.invokeWithUsage(messages, {
+      model,
+      temperature: 0,
+      signal: this.signalOf(config),
+    });
     this.langfuse.endGeneration(generation, { output: raw.slice(0, 2000), usage });
 
     let parsed = parseIntentJson(raw, query);
@@ -556,6 +615,7 @@ export class AgentService {
         model,
         temperature: 0,
         timeout: NODE_TIMEOUT_MS,
+        signal: this.signalOf(config),
       });
       this.langfuse.endGeneration(generation, {
         output: JSON.stringify(toolCalls).slice(0, 2000),
@@ -574,6 +634,8 @@ export class AgentService {
         output: (e as Error).message,
         usage: { prompt_tokens: 0, completion_tokens: 0 },
       });
+      // 停止不是规划失败，不能降级成继续往下检索
+      if (isAbortLike(e) || this.signalOf(config)?.aborted) throw isAbortLike(e) ? e : abortedError();
       this.logger.warn(`plan_or_act fallback: ${(e as Error).message}`);
     }
 
@@ -615,6 +677,8 @@ export class AgentService {
     }
 
     for (const name of tools) {
+      // 上一个工具返回前用户已经点了停止，不要再开下一个
+      this.throwIfAborted(config);
       const t0 = Date.now();
       const toolSpan = this.langfuse.createSpan(this.traceOf(config), name, {
         query: state.rewrittenQuery,
@@ -676,9 +740,11 @@ export class AgentService {
           output,
         });
       } catch (e) {
+        this.langfuse.endSpan(toolSpan, {}, e as Error);
+        // 停止要冒泡到图外面，按快照落库；当成工具失败会继续跑后面的步骤
+        if (isAbortLike(e) || this.signalOf(config)?.aborted) throw isAbortLike(e) ? e : abortedError();
         this.logger.warn(`tool ${name} failed: ${(e as Error).message}`);
         degraded.push(name);
-        this.langfuse.endSpan(toolSpan, {}, e as Error);
         cb?.onStepEnd?.(name, Date.now() - t0, true);
         cb?.onToolEnd?.(name, '失败');
         traces.push({
@@ -754,7 +820,9 @@ export class AgentService {
           { model: this.config.get<string>('llm.routerModel'), temperature: 0, timeout: NODE_TIMEOUT_MS },
         );
         decided = parseEvaluateJson(text) ?? decided;
-      } catch {
+      } catch (e) {
+        // 停止不能被评估失败兜底吞掉，否则会接着改写、再检索
+        if (isAbortLike(e) || this.signalOf(config)?.aborted) throw isAbortLike(e) ? e : abortedError();
         /* 启发式兜底 */
       }
     }
@@ -815,7 +883,8 @@ export class AgentService {
         { model: this.config.get<string>('llm.routerModel'), temperature: 0, timeout: NODE_TIMEOUT_MS },
       );
       if (text.trim() && text.trim() !== state.rewrittenQuery) next = text.trim();
-    } catch {
+    } catch (e) {
+      if (isAbortLike(e) || this.signalOf(config)?.aborted) throw isAbortLike(e) ? e : abortedError();
       /* 保持原检索词再试一轮 */
     }
 
@@ -860,7 +929,8 @@ export class AgentService {
       const thinking = text.trim();
       if (thinking) this.callbacksOf(config)?.onThinking?.(thinking);
       return { thinking };
-    } catch {
+    } catch (e) {
+      if (isAbortLike(e) || this.signalOf(config)?.aborted) throw isAbortLike(e) ? e : abortedError();
       return { thinking: '' };
     }
   }
@@ -1006,12 +1076,14 @@ export class AgentService {
 
     let answer = '';
     const signal = this.signalOf(config);
-    const { iterator, usage } = this.llm.streamChat(messages);
+    const { iterator, usage } = this.llm.streamChat(messages, { signal });
     for await (const delta of iterator) {
-      if (signal?.aborted) break;
+      // 停了就抛出，不能带着半截答案正常返回，否则这一步算成功、整轮会落库
+      if (signal?.aborted) throw abortedError();
       answer += delta;
       callbacks?.onToken(delta);
     }
+    if (signal?.aborted) throw abortedError();
     this.langfuse.endGeneration(generation, { output: answer.slice(0, 2000), usage });
 
     const groups = this.groupChunksByDocument(state.rerankedChunks);

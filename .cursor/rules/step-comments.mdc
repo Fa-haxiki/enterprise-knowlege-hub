@@ -1,0 +1,38 @@
+---
+description: 写代码时为每个逻辑步骤补上通俗易懂的中文注释
+alwaysApply: true
+---
+
+# 分步注释规则
+
+写或改代码时，**每个逻辑步骤**都要有注释，让没看过这段实现的人也能顺着读懂。
+
+## 要求
+
+- 用**简体中文**，说人话：这一步在干什么、为什么要这么做
+- 按步骤注释，不要给每一行赋值都加一句（`i += 1` 不必写）
+- 优先写意图，禁止复述代码（不要写「调用 foo」「定义变量 x」）
+- 分支、循环、提前 return、和前后步骤的衔接，必须点明
+- 新增函数先用一两句说明入参/结果/副作用；改已有代码时补上缺的步骤注释，不要顺手删别人的注释
+
+## 示例
+
+```ts
+// ❌ 复述语法，读了等于没读
+const id = req.params.id; // 取出 id
+const run = await this.runs.getActiveRun(id); // 查询 run
+
+// ✅ 讲清楚这一步解决什么问题
+// 刷新后本地面板没了，用会话 id 问后台这场问答是否还在跑
+const run = await this.runs.getActiveRun(req.params.id);
+if (!run) return; // 已经结束或从未开始，后面按普通历史消息渲染
+```
+
+```ts
+// ✅ 多步流程：每步一句，串起来能当提纲
+// 切走时只摘掉 UI 回调，fetch 继续收帧，避免后台图被 abort
+session.setHandlers(null);
+// 回来先把已攒的事件重放一遍，再挂上回调收后续帧
+session.replay(handlers);
+session.setHandlers(handlers);
+```

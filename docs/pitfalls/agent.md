@@ -85,3 +85,10 @@
 - **根因**：改写 prompt 要求「结合对话历史写成独立问题」；最新问句本身已完整，模型仍把窗口里上一轮主题写进来。注入拦截失败时那一轮还会留在 Redis 窗口
 - **修复**：独立完整问句跳过 LLM 改写（`needsQueryRewrite`）；改写历史丢掉注入轮+随后助手回复（`sanitizeRewriteHistory`）；prompt 禁止换题
 - **相关**：`agent-query-rewrite.ts`、`agent.service.ts` `queryRewrite`
+
+## 手动停止后整轮仍跑完并落库
+
+- **现象**：点停止后后台还是走完检索、评估和生成，问答记录是完整答案，不是停在当前步
+- **根因**：`cancel()` 只把 AbortSignal 标成 aborted。节点里的 `catch` 把中止当成普通失败吞掉，`llmGenerate` 遇到停止只 `break` 然后正常返回。图因此调度下一步，控制器走成功分支 `saveAssistantMessage`，`RunSnapshot` 只有抛错时才用
+- **修复**：节点用 `raceSignal` 在停止时立刻失败并向上抛；模型调用带上 signal；成功返回前再看一次 `abort.signal`，已停止则改走快照落库
+- **相关**：`agent.service.ts` `wrap` / `llmGenerate`、`agui.controller.ts`、`llm.service.ts`
