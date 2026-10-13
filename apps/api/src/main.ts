@@ -32,7 +32,7 @@ async function bootstrap() {
   app.useGlobalInterceptors(new TransformInterceptor());
 
   const swaggerConfig = new DocumentBuilder()
-    .setTitle('Enterprise Knowledge Hub API')
+    .setTitle('超级码知枢 · 企业智能知识与问答平台 API')
     .setVersion('0.1.0')
     .addBearerAuth()
     .build();

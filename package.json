@@ -2,7 +2,7 @@
   "name": "enterprise-knowledge-hub",
   "version": "0.1.0",
   "private": true,
-  "description": "Enterprise Knowledge Hub - Agentic RAG knowledge base",
+  "description": "超级码知枢 · 企业智能知识与问答平台",
   "scripts": {
     "dev:up": "bash scripts/dev-up.sh",
     "dev:down": "bash scripts/dev-down.sh",

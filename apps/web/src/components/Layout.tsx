@@ -116,7 +116,10 @@ export default function Layout() {
               <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z" />
             </svg>
           </div>
-          <span className="text-base font-semibold tracking-tight">企业知识库</span>
+          <div className="min-w-0 leading-none">
+            <div className="truncate text-sm font-semibold tracking-tight">超级码知枢</div>
+            <div className="mt-0.5 truncate text-[11px] font-normal text-ink-400">企业智能知识与问答平台</div>
+          </div>
         </div>
         <nav className="flex-1 space-y-1 p-3">
           {visibleItems.map((item) => (

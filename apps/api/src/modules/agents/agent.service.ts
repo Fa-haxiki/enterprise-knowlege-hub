@@ -1039,7 +1039,7 @@ export class AgentService {
     });
     const insufficient = state.evidenceGrade === EvidenceGrade.GIVE_UP;
     const systemPrompt =
-      `你是企业知识库助手。当前时间：${now}（北京时间）。规则：\n` +
+      `你是超级码知枢（企业智能知识与问答平台）的助手。当前时间：${now}（北京时间）。规则：\n` +
       '1. 仅依据「参考资料」「知识图谱推理链路」与「外部公开信息」回答，不得编造内部事实；\n' +
       '2. 引用资料时用 [数字] 角标标注，与参考资料编号对应；同一篇文档全程只用同一个编号；\n' +
       '3. 外部公开信息与内部资料分开表述，不要把网页当成内部制度；\n' +

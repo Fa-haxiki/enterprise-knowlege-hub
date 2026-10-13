@@ -57,7 +57,10 @@ export default function LoginPage() {
               <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z" />
             </svg>
           </div>
-          <span className="text-lg font-semibold">企业知识库</span>
+          <div className="leading-tight">
+            <div className="text-lg font-semibold">超级码知枢</div>
+            <div className="text-xs text-white/70">企业智能知识与问答平台</div>
+          </div>
         </div>
         <div>
           <h1 className="text-3xl font-bold leading-snug">
@@ -66,7 +69,7 @@ export default function LoginPage() {
             一问即达。
           </h1>
           <p className="mt-4 max-w-md text-sm leading-6 text-white/70">
-            基于 Agentic RAG 的企业级知识中枢：混合检索、图谱推理、分层记忆，
+            企业智能知识与问答平台：混合检索、图谱推理、分层记忆，
             让每一份制度文档都成为可对话的知识资产。
           </p>
         </div>
@@ -80,7 +83,8 @@ export default function LoginPage() {
       <div className="flex flex-1 items-center justify-center bg-surface p-6">
         <div className="w-full max-w-sm animate-fadeUp">
           <div className="mb-8 lg:hidden">
-            <h1 className="text-xl font-semibold text-ink-900">企业知识库</h1>
+            <h1 className="text-xl font-semibold text-ink-900">超级码知枢</h1>
+            <p className="mt-1 text-xs text-ink-400">企业智能知识与问答平台</p>
           </div>
           <h2 className="text-xl font-semibold text-ink-900">
             {mode === 'login' ? '欢迎回来' : '创建账号'}
