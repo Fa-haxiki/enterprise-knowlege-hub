@@ -17,7 +17,7 @@ export default function EmptyChat({ onAsk }: Props) {
           <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z" />
         </svg>
       </div>
-      <h2 className="text-xl font-semibold text-ink-900">向知识库提问</h2>
+      <h2 className="text-xl font-semibold text-ink-900">向超级码知枢提问</h2>
       <p className="mt-2 text-sm text-ink-400">支持制度查询、项目关联分析等多轮问答，答案附引用来源</p>
       <div className="mt-8 grid w-full max-w-xl grid-cols-1 gap-2 sm:grid-cols-2">
         {SUGGESTIONS.map((s) => (

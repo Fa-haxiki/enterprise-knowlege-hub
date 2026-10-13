@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一键启动企业知识库全部本地服务：Docker 中间件 + API + Worker + Web
+# 一键启动超级码知枢全部本地服务：Docker 中间件 + API + Worker + Web
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
