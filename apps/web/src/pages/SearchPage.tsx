@@ -196,7 +196,7 @@ export default function SearchPage() {
       <div className="border-b border-border bg-card px-6 py-5">
         <div className="mx-auto max-w-5xl">
           <h1 className="mb-1 text-lg font-semibold text-ink-900">智能搜索</h1>
-          <p className="mb-4 text-xs text-ink-400">在你有权限的知识空间中检索文档分片，高亮命中段落，点击可打开原文档</p>
+          <p className="mb-4 text-xs text-ink-400">在你有权限的知识空间和公司公共文档中检索，高亮命中段落，点击可打开原文档</p>
           {/* 搜索框与筛选条件同一行：控件等高 h-10，窄屏自动换行 */}
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative min-w-52 flex-1">
@@ -220,7 +220,7 @@ export default function SearchPage() {
               onChange={(e) => setWorkspaceId(e.target.value)}
               className="h-10 rounded-xl border border-border bg-subtle/50 px-2.5 text-xs text-ink-600 outline-none transition-colors focus:border-brand-500"
             >
-              <option value="">全部空间</option>
+              <option value="">全部范围</option>
               {workspaces.map((w) => (
                 <option key={w.id} value={w.id}>{w.name}</option>
               ))}

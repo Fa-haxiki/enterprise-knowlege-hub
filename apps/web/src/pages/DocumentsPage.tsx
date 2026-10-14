@@ -18,6 +18,9 @@ interface DocumentItem {
   review_note: string | null;
   uploader: { id: string; name: string } | null;
   created_at: string;
+  company_published_at?: string | null;
+  source_department?: { id: string; name: string } | null;
+  source_workspace?: { id: string; name: string } | null;
 }
 
 const STATUS_LABEL: Record<string, { label: string; className: string }> = {
@@ -53,6 +56,8 @@ export default function DocumentsPage() {
   /** 审核入口并入空间：canReview 决定「待审核」Tab 是否可见，pendingCount 为角标 */
   const [canReview, setCanReview] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
+  /** 公司公共空间：只读列表，文档来自各部门的发布 */
+  const [isCompany, setIsCompany] = useState(false);
   const [tab, setTab] = useState<'all' | 'review'>(searchParams.get('tab') === 'review' ? 'review' : 'all');
   const [loading, setLoading] = useState(true);
   /** 翻页中：保留当前列表半透明过渡，不闪骨架屏 */
@@ -73,6 +78,7 @@ export default function DocumentsPage() {
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [uploading, setUploading] = useState(false);
   const [retrying, setRetrying] = useState<string | null>(null);
+  const [publishing, setPublishing] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState('');
   const [preview, setPreview] = useState<DocPreview | null>(null);
@@ -148,7 +154,14 @@ export default function DocumentsPage() {
   /** 刷新空间元信息（角色/审核权限/待审数），审核操作后同步角标 */
   const refreshMeta = useCallback(() => {
     if (!workspaceId) return;
-    interface WsMeta { id: string; name: string; role: string; can_review?: boolean; pending_count?: number }
+    interface WsMeta {
+      id: string;
+      name: string;
+      role: string;
+      visibility?: 'private' | 'company';
+      can_review?: boolean;
+      pending_count?: number;
+    }
     return api
       .get<WsMeta[]>('/workspaces')
       .then((list) => {
@@ -157,6 +170,7 @@ export default function DocumentsPage() {
         setWsName(ws?.name ?? '');
         setCanReview(!!ws?.can_review);
         setPendingCount(ws?.pending_count ?? 0);
+        setIsCompany(ws?.visibility === 'company');
       })
       .catch(() => setWsRole(null));
   }, [workspaceId]);
@@ -201,7 +215,30 @@ export default function DocumentsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
-  const canEdit = wsRole === 'owner' || wsRole === 'editor' || user?.role === 'sysadmin';
+  const canEdit = !isCompany && (wsRole === 'owner' || wsRole === 'editor' || user?.role === 'sysadmin');
+
+  const togglePublish = async (doc: DocumentItem) => {
+    if (publishing) return;
+    const published = !!doc.company_published_at;
+    const ok = await confirm({
+      title: published ? '撤回发布' : '发布到公共空间',
+      description: published
+        ? '撤回后仅部门成员可以查看和搜索，公共空间中不再出现。部门内的文档仍会保留。'
+        : '发布后公司内部人员都可以查看和搜索这篇文档。部门内的原文保持不变，后续更新会自动同步。',
+      confirmText: published ? '确认撤回' : '确认发布',
+    });
+    if (!ok) return;
+    setPublishing(doc.id);
+    setError('');
+    try {
+      await api.post(`/documents/${doc.id}/${published ? 'unpublish' : 'publish'}`);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : published ? '撤回失败' : '发布失败');
+    } finally {
+      setPublishing(null);
+    }
+  };
 
   const review = async (docId: string, approve: boolean, note?: string) => {
     if (acting) return;
@@ -411,14 +448,16 @@ export default function DocumentsPage() {
             <path d="m9 18 6-6-6-6" />
           </svg>
           <span className="truncate text-sm font-semibold text-ink-900">{wsName || '文档管理'}</span>
-          <Link
-            to={`/workspaces/${workspaceId}/graph`}
-            className="ml-2 shrink-0 rounded-lg px-2 py-1 text-xs font-medium text-brand-600 transition-colors hover:bg-brand-600/10"
-          >
-            知识图谱
-          </Link>
+          {wsRole && !isCompany && (
+            <Link
+              to={`/workspaces/${workspaceId}/graph`}
+              className="ml-2 shrink-0 rounded-lg px-2 py-1 text-xs font-medium text-brand-600 transition-colors hover:bg-brand-600/10"
+            >
+              知识图谱
+            </Link>
+          )}
           <span className="ml-auto hidden text-xs text-ink-400 sm:block">
-            上传后需部门审核，通过后自动解析入库
+            {isCompany ? '公司内部人员均可查看和搜索' : '上传后需部门审核，通过后自动解析入库'}
           </span>
         </nav>
         {error && (
@@ -657,7 +696,13 @@ export default function DocumentsPage() {
         ) : docs.length === 0 ? (
           <div className="rounded-card border border-dashed border-border py-14 text-center">
             <p className="text-sm text-ink-400">
-              {tab === 'review' ? '没有待审核的文档' : canEdit ? '暂无文档，上传后自动解析入库' : '暂无文档'}
+              {tab === 'review'
+                ? '没有待审核的文档'
+                : isCompany
+                  ? '还没有发布到公共空间的文档'
+                  : canEdit
+                    ? '暂无文档，上传后自动解析入库'
+                    : '暂无文档'}
             </p>
           </div>
         ) : (
@@ -691,6 +736,12 @@ export default function DocumentsPage() {
                         {tab === 'review' && doc.uploader && (
                           <>
                             <span>{doc.uploader.name} 上传</span>
+                            <span>·</span>
+                          </>
+                        )}
+                        {isCompany && (doc.source_department || doc.source_workspace) && (
+                          <>
+                            <span>来自 {doc.source_department?.name ?? doc.source_workspace?.name}</span>
                             <span>·</span>
                           </>
                         )}
@@ -730,9 +781,32 @@ export default function DocumentsPage() {
                       </div>
                     ) : (
                       <>
+                        {doc.company_published_at && !isCompany && (
+                          <span className="shrink-0 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                            已发布
+                          </span>
+                        )}
                         <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ${st.className}`}>
                           {st.label}
                         </span>
+                        {canEdit && doc.status === 'READY' && !doc.company_published_at && (
+                          <button
+                            onClick={() => void togglePublish(doc)}
+                            disabled={publishing === doc.id}
+                            className="shrink-0 rounded-lg border border-emerald-500/30 px-2.5 py-1 text-xs font-medium text-emerald-600 transition-colors hover:bg-emerald-500/10 disabled:opacity-50 dark:text-emerald-400"
+                          >
+                            {publishing === doc.id ? '发布中' : '发布到公共空间'}
+                          </button>
+                        )}
+                        {canEdit && doc.company_published_at && (
+                          <button
+                            onClick={() => void togglePublish(doc)}
+                            disabled={publishing === doc.id}
+                            className="shrink-0 rounded-lg border border-border px-2.5 py-1 text-xs font-medium text-ink-500 transition-colors hover:bg-subtle disabled:opacity-50"
+                          >
+                            {publishing === doc.id ? '撤回中' : '撤回发布'}
+                          </button>
+                        )}
                         {canEdit && doc.status === 'FAILED' && (
                           <button
                             onClick={() => void retry(doc.id)}

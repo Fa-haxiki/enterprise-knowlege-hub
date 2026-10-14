@@ -9,6 +9,7 @@ import { RedisService } from '../../redis/redis.service';
 import { AclService } from '../workspaces/acl.service';
 import { AclAlertService } from '../audit/acl-alert.service';
 import { IngestionProducer } from '../ingestion/ingestion.producer';
+import { EsService } from '../retrieval/es.service';
 import { StorageService } from './storage.service';
 import type { AuthUser } from '../../common/decorators/current-user.decorator';
 
@@ -36,9 +37,11 @@ export class DocumentsService {
     private readonly acl: AclService,
     private readonly redis: RedisService,
     private readonly alert: AclAlertService,
+    private readonly es: EsService,
   ) {}
 
   async uploadInit(workspaceId: string, uploaderId: string, filename: string, fileSize: number, mimeType: string) {
+    await this.assertNotCompanyWorkspace(workspaceId);
     if (!ALLOWED_MIME.has(mimeType)) {
       throw new BizException(ErrorCode.PARAM_INVALID, `不支持的文件类型: ${mimeType}`, 400);
     }
@@ -82,6 +85,8 @@ export class DocumentsService {
     }
 
     doc.contentHash = contentHash;
+    // 先落内容哈希；状态推进只改 status，不会顺带把这一列写进去
+    await this.documents.update(doc.id, { contentHash });
     // 审核制：上传完成后进入待审核，由部门审核员通过后才入队解析
     await this.transition(doc, DocumentStatus.PENDING_REVIEW);
     return { document_id: doc.id, status: DocumentStatus.PENDING_REVIEW };
@@ -103,6 +108,7 @@ export class DocumentsService {
 
   /** 上传前预检：前端算好 sha256 先查重，命中则不必上传 */
   async checkDuplicate(workspaceId: string, contentHash: string) {
+    await this.assertNotCompanyWorkspace(workspaceId);
     if (!/^[0-9a-f]{64}$/.test(contentHash)) {
       throw new BizException(ErrorCode.PARAM_INVALID, 'content_hash 格式不正确', 400);
     }
@@ -123,12 +129,17 @@ export class DocumentsService {
 
     doc.reviewedBy = user.userId;
     doc.reviewedAt = new Date();
+    doc.reviewNote = approve ? null : reason?.trim() || null;
+    // 审核人信息单独落库；transition 只改状态，避免整行 save 覆盖发布标记
+    await this.documents.update(doc.id, {
+      reviewedBy: doc.reviewedBy,
+      reviewedAt: doc.reviewedAt,
+      reviewNote: doc.reviewNote,
+    });
     if (approve) {
-      doc.reviewNote = null;
       await this.transition(doc, DocumentStatus.PARSING);
       await this.ingestion.enqueue({ documentId: doc.id });
     } else {
-      doc.reviewNote = reason?.trim() || null;
       await this.transition(doc, DocumentStatus.REJECTED);
     }
     return { document_id: doc.id, status: doc.status };
@@ -206,17 +217,29 @@ export class DocumentsService {
     pageSize = 20,
     filters?: { keyword?: string; status?: string; type?: string; dateFrom?: string; dateTo?: string },
   ) {
+    const space = await this.workspaces.findOne({ where: { id: workspaceId }, select: ['id', 'visibility'] });
+    if (!space) throw new BizException(ErrorCode.NOT_FOUND, '空间不存在', 404);
+    const isCompany = space.visibility === 'company';
+
     const qb = this.documents
       .createQueryBuilder('d')
       .leftJoin('d.uploader', 'u')
-      .addSelect(['u.id', 'u.name'])
-      .where('d.workspace_id = :workspaceId', { workspaceId })
-      .andWhere('d.deleted_at IS NULL')
-      // 排序必须用实体属性路径（d.createdAt）：join + 分页时 TypeORM 走
-      // createOrderByCombinedWithSelectExpression，按属性名解析元数据，列名会报 databaseName undefined
-      .orderBy('d.createdAt', 'DESC')
-      .skip((page - 1) * pageSize)
-      .take(pageSize);
+      .addSelect(['u.id', 'u.name']);
+    if (isCompany) {
+      // 公共空间不存副本：列出全部已发布文档，并带上来源部门
+      qb.leftJoinAndSelect('d.workspace', 'ws')
+        .leftJoinAndSelect('ws.department', 'dep')
+        .where('d.company_published_at IS NOT NULL')
+        .andWhere('d.deleted_at IS NULL')
+        .orderBy('d.companyPublishedAt', 'DESC');
+    } else {
+      qb.where('d.workspace_id = :workspaceId', { workspaceId })
+        .andWhere('d.deleted_at IS NULL')
+        // 排序必须用实体属性路径（d.createdAt）：join + 分页时 TypeORM 走
+        // createOrderByCombinedWithSelectExpression，按属性名解析元数据，列名会报 databaseName undefined
+        .orderBy('d.createdAt', 'DESC');
+    }
+    qb.skip((page - 1) * pageSize).take(pageSize);
     if (filters?.keyword) {
       qb.andWhere('d.title ILIKE :kw', { kw: `%${filters.keyword}%` });
     }
@@ -254,6 +277,11 @@ export class DocumentsService {
         review_note: d.reviewNote,
         uploader: d.uploader ? { id: d.uploader.id, name: d.uploader.name } : null,
         created_at: d.createdAt,
+        company_published_at: d.companyPublishedAt ? new Date(d.companyPublishedAt).toISOString() : null,
+        source_department: d.workspace?.department
+          ? { id: d.workspace.department.id, name: d.workspace.department.name }
+          : null,
+        source_workspace: isCompany && d.workspace ? { id: d.workspace.id, name: d.workspace.name } : null,
       })),
     };
   }
@@ -301,7 +329,8 @@ export class DocumentsService {
       if (!roleByWs.has(doc.workspaceId)) {
         roleByWs.set(doc.workspaceId, await this.acl.getRole(user.userId, doc.workspaceId));
       }
-      if (roleByWs.get(doc.workspaceId)) allowed.push(doc);
+      // 已发布文档对全员可见，进度也要能查到；未发布的仍按空间角色
+      if (roleByWs.get(doc.workspaceId) || doc.companyPublishedAt) allowed.push(doc);
     }
 
     // pipeline 批量取进度 hash，一次 Redis 往返
@@ -346,7 +375,8 @@ export class DocumentsService {
   async transition(doc: DocumentEntity, status: DocumentStatus, errorMsg: string | null = null) {
     doc.status = status;
     doc.errorMsg = errorMsg;
-    await this.documents.save(doc);
+    // 只改状态列，避免把并发写入的发布标记覆盖掉
+    await this.documents.update(doc.id, { status, errorMsg });
     await this.redis.raw.hset(progressKey(doc.id), { stage: status.toLowerCase() });
     await this.redis.raw.expire(progressKey(doc.id), 3600);
   }
@@ -377,10 +407,42 @@ export class DocumentsService {
     return doc;
   }
 
-  /** 查看/下载权限：空间成员、文档所属部门的审核员（审核预览需要）、sysadmin */
+  /**
+   * 发布到公司公共空间 / 撤回。文档仍留在部门空间，只改标记并同步 ES。
+   * 操作人：空间 editor/owner、该部门管理员，或 sysadmin。仅 READY 可发布。
+   */
+  async publish(user: AuthUser, documentId: string, published: boolean) {
+    const doc = await this.mustGet(documentId);
+    await this.assertCanPublish(user, doc);
+    if (published && doc.status !== DocumentStatus.READY) {
+      throw new BizException(ErrorCode.DOC_STATUS_INVALID, '仅已入库的文档可以发布到公共空间', 400);
+    }
+    const already = !!doc.companyPublishedAt;
+    if (published === already) {
+      return { document_id: doc.id, company_published_at: doc.companyPublishedAt };
+    }
+
+    const companyPublishedAt = published ? new Date() : null;
+    const publishedBy = published ? user.userId : null;
+    await this.documents.update(doc.id, { companyPublishedAt, publishedBy });
+    try {
+      await this.es.setCompanyPublic(doc.id, published);
+    } catch {
+      // 索引没写上就回滚标记，避免列表已发布但搜不到
+      await this.documents.update(doc.id, {
+        companyPublishedAt: doc.companyPublishedAt,
+        publishedBy: doc.publishedBy,
+      });
+      throw new BizException(ErrorCode.ES_UNAVAILABLE, '检索索引更新失败，请稍后重试', 503);
+    }
+    return { document_id: doc.id, company_published_at: companyPublishedAt };
+  }
+
+  /** 查看/下载权限：空间成员、已发布到公司的文档（任意在职用户）、文档所属部门的审核员、sysadmin */
   async assertViewable(user: AuthUser, documentId: string) {
     const doc = await this.mustGet(documentId);
     if (user.role === SystemRole.SYSADMIN) return doc;
+    if (doc.companyPublishedAt) return doc;
     const role = await this.acl.getRole(user.userId, doc.workspaceId);
     if (role) return doc;
     if (await this.isDocReviewer(user.userId, doc)) return doc;
@@ -397,6 +459,34 @@ export class DocumentsService {
     if (user.role === SystemRole.SYSADMIN) return;
     if (await this.isDocReviewer(user.userId, doc)) return;
     throw new BizException(ErrorCode.ACL_FORBIDDEN, '您不是该文档所属部门的审核员', 403);
+  }
+
+  /** 公共空间只收已发布文档，不接受直接上传 */
+  private async assertNotCompanyWorkspace(workspaceId: string) {
+    const ws = await this.workspaces.findOne({ where: { id: workspaceId }, select: ['id', 'visibility'] });
+    if (!ws) throw new BizException(ErrorCode.NOT_FOUND, '空间不存在', 404);
+    if (ws.visibility === 'company') {
+      throw new BizException(ErrorCode.ACL_FORBIDDEN, '公共空间不接受直接上传，请在部门空间发布已入库文档', 403);
+    }
+  }
+
+  /** 发布权限：sysadmin、原空间 editor/owner，或文档所属部门的管理员 */
+  private async assertCanPublish(user: AuthUser, doc: DocumentEntity) {
+    const ws = await this.workspaces.findOne({ where: { id: doc.workspaceId } });
+    if (ws?.visibility === 'company') {
+      throw new BizException(ErrorCode.PARAM_INVALID, '公共空间中的文档无需再次发布', 400);
+    }
+    if (user.role === SystemRole.SYSADMIN) return;
+    const role = await this.acl.getRole(user.userId, doc.workspaceId);
+    const rank: Record<WorkspaceRole, number> = { viewer: 1, editor: 2, owner: 3 };
+    if (role && rank[role] >= rank[WorkspaceRole.EDITOR]) return;
+    if (ws?.departmentId && (await this.acl.isDepartmentAdmin(user.userId, ws.departmentId))) return;
+    await this.alert.trackDenied({
+      userId: user.userId,
+      resource: 'document',
+      detail: { document_id: doc.id, role: role ?? null, required: 'editor|dept_admin' },
+    });
+    throw new BizException(ErrorCode.ACL_FORBIDDEN, '无权发布该文档', 403);
   }
 
   private async isDocReviewer(userId: string, doc: DocumentEntity) {

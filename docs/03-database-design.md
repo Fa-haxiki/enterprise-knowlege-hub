@@ -29,7 +29,7 @@ erDiagram
         varchar name
         text description
         uuid owner_id FK
-        varchar visibility "private"
+        varchar visibility "private/company"
         timestamptz created_at
     }
     workspace_members {
@@ -49,6 +49,8 @@ erDiagram
         text error_msg
         jsonb meta "页数/语言/解析器版本"
         uuid uploader_id FK
+        timestamptz company_published_at "空=未发布"
+        uuid published_by
         timestamptz created_at
     }
     document_chunks {
@@ -136,7 +138,7 @@ CREATE TABLE workspaces (
     name        VARCHAR(128) NOT NULL,
     description TEXT,
     owner_id    UUID NOT NULL REFERENCES users(id),
-    visibility  VARCHAR(16) NOT NULL DEFAULT 'private',
+    visibility  VARCHAR(16) NOT NULL DEFAULT 'private', -- private | company（全公司唯一的公共空间）
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -161,6 +163,8 @@ CREATE TABLE documents (
     error_msg   TEXT,
     meta        JSONB NOT NULL DEFAULT '{}',
     uploader_id UUID NOT NULL REFERENCES users(id),
+    company_published_at TIMESTAMPTZ,             -- 非空表示已发布到公司公共空间，文档仍属原 workspace
+    published_by UUID,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );

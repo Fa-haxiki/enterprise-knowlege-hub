@@ -103,7 +103,7 @@ Accept: text/event-stream
   "options": {
     "enable_graph": true,           // 允许复杂路由触发图谱（默认 true）
     "enable_tts": false,            // 语音（默认 false）
-    "model": "deepseek-chat"        // 可选覆盖默认模型
+    "model": "doubao-seed-2.0-mini" // 可选覆盖默认模型
   }
 }
 ```

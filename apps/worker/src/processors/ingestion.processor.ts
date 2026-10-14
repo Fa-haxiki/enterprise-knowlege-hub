@@ -255,6 +255,12 @@ export class IngestionProcessor extends WorkerHost {
         where: { documentId: doc.id, role: 'child' },
         order: { chunkIndex: 'ASC' },
       });
+      // 解析期间可能已发布；写 ES 前再读一次，避免重建索引把发布标记打回未发布
+      const fresh = await this.documents.findOne({
+        where: { id: doc.id },
+        select: ['id', 'companyPublishedAt'],
+      });
+      const companyPublic = !!fresh?.companyPublishedAt;
       for (const chunk of savedChildren) {
         await this.es.indexChunk({
           chunk_id: chunk.id,
@@ -265,6 +271,7 @@ export class IngestionProcessor extends WorkerHost {
           content: chunk.content,
           heading_path: chunk.headingPath,
           parent_id: chunk.parentId,
+          company_public: companyPublic,
         });
       }
       await this.es.raw.indices.refresh({ index: this.es.indexName }).catch(() => undefined);
@@ -469,7 +476,8 @@ export class IngestionProcessor extends WorkerHost {
   private async transition(doc: DocumentEntity, status: DocumentStatus, percent: number | null, errorMsg: string | null = null) {
     doc.status = status;
     doc.errorMsg = errorMsg;
-    await this.documents.save(doc);
+    // 只改状态列：save 整行会把并发写入的 company_published_at 覆盖回旧值
+    await this.documents.update(doc.id, { status, errorMsg });
     const fields: Record<string, string> = { stage: status.toLowerCase() };
     if (percent !== null) fields.percent = String(percent);
     await this.redis.raw.hset(progressKey(doc.id), fields);

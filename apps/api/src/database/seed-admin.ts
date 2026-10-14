@@ -6,11 +6,13 @@ import { DepartmentEntity } from './entities/department.entity';
 import { DepartmentAdminEntity } from './entities/department-admin.entity';
 import { DepartmentMemberEntity } from './entities/department-member.entity';
 import { SystemRole, UserStatus } from '@ekh/shared';
+import { WorkspaceEntity } from './entities/workspace.entity';
 
 /**
  * 初始化种子数据：pnpm seed:admin
  * - 系统管理员（sysadmin，ACTIVE）
  * - 示例部门 + 部门管理员 + 普通测试用户（均为 ACTIVE，便于开发联调）
+ * - 公司公共空间（全员只读入口，不挂部门、不复制文档）
  */
 async function seed() {
   await AppDataSource.initialize();
@@ -61,6 +63,22 @@ async function seed() {
   if (!(await deptMembers.exist({ where: { departmentId: dep.id, userId: demo.id } }))) {
     await deptMembers.save(deptMembers.create({ departmentId: dep.id, userId: demo.id, addedBy: admin.id }));
     console.log('dept member added: demo@ekh.local -> 综合管理部');
+  }
+
+  // 全员只读入口：不挂部门、不加成员，文档仍留在原部门空间
+  const workspaces = AppDataSource.getRepository(WorkspaceEntity);
+  const company = await workspaces.findOne({ where: { visibility: 'company' } });
+  if (!company) {
+    await workspaces.save(
+      workspaces.create({
+        name: '公司公共空间',
+        description: '已发布的部门文档，公司内部人员均可查看和搜索',
+        ownerId: admin.id,
+        departmentId: null,
+        visibility: 'company',
+      }),
+    );
+    console.log('workspace created: 公司公共空间');
   }
 
   await AppDataSource.destroy();

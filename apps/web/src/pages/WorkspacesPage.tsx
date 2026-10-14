@@ -10,6 +10,7 @@ interface Workspace {
   name: string;
   description: string | null;
   role: 'owner' | 'editor' | 'viewer';
+  visibility?: 'private' | 'company';
   department: { id: string; name: string } | null;
   /** 待审核文档数（后端按空间统计） */
   pending_count: number;
@@ -100,7 +101,8 @@ export default function WorkspacesPage() {
     }
   };
 
-  const canManage = (ws: Workspace) => ws.role === 'owner' || user?.role === 'sysadmin';
+  const canManage = (ws: Workspace) =>
+    ws.visibility !== 'company' && (ws.role === 'owner' || user?.role === 'sysadmin');
 
   const openEdit = (e: MouseEvent, ws: Workspace) => {
     e.preventDefault();
@@ -224,10 +226,14 @@ export default function WorkspacesPage() {
           </div>
         ) : (
           <div className="grid gap-3 sm:grid-cols-2">
-            {(pendingMode
-              ? [...list].sort((a, b) => b.pending_count - a.pending_count)
-              : list
-            ).map((ws) => (
+            {(() => {
+              const ordered = pendingMode
+                ? [...list].sort((a, b) => b.pending_count - a.pending_count)
+                : list;
+              const company = ordered.filter((ws) => ws.visibility === 'company');
+              const rest = ordered.filter((ws) => ws.visibility !== 'company');
+              return [...company, ...rest];
+            })().map((ws) => (
               <Link
                 key={ws.id}
                 to={`/workspaces/${ws.id}/documents`}
@@ -247,9 +253,15 @@ export default function WorkspacesPage() {
                     </div>
                     <div className="font-medium text-ink-900">{ws.name}</div>
                   </div>
-                  <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs ${ROLE_CLS[ws.role]}`}>
-                    {ROLE_LABEL[ws.role]}
-                  </span>
+                  {ws.visibility === 'company' ? (
+                    <span className="shrink-0 rounded-full bg-emerald-500/10 px-2.5 py-1 text-xs text-emerald-600 dark:text-emerald-400">
+                      全员可见
+                    </span>
+                  ) : (
+                    <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs ${ROLE_CLS[ws.role]}`}>
+                      {ROLE_LABEL[ws.role]}
+                    </span>
+                  )}
                 </div>
                 {ws.description && (
                   <div className="mt-2 line-clamp-2 text-sm leading-5 text-ink-400">{ws.description}</div>

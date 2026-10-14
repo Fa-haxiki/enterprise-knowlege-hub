@@ -1,11 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, IsNull, Repository } from 'typeorm';
-import { DocumentStatus, ErrorCode, SystemRole, WorkspaceRole } from '@ekh/shared';
+import { DocumentStatus, ErrorCode, SystemRole, UserStatus, WorkspaceRole } from '@ekh/shared';
 import { WorkspaceEntity } from '../../database/entities/workspace.entity';
 import { WorkspaceMemberEntity } from '../../database/entities/workspace-member.entity';
 import { DepartmentEntity } from '../../database/entities/department.entity';
 import { DocumentEntity } from '../../database/entities/document.entity';
+import { UserEntity } from '../../database/entities/user.entity';
 import { BizException } from '../../common/filters/http-exception.filter';
 import { AclService } from './acl.service';
 import type { AuthUser } from '../../common/decorators/current-user.decorator';
@@ -36,7 +37,34 @@ export class WorkspacesService {
     return { items: deps.map((d) => ({ id: d.id, name: d.name })) };
   }
 
-  /** 列出当前用户可见的空间（含角色）：显式成员空间 ∪ 所属部门挂靠的空间（默认 viewer）。
+  /**
+   * 保证存在唯一的公司公共空间。没有 sysadmin 时先跳过，等种子账号创建后再补。
+   * 并发创建撞上唯一索引时再读一次。
+   */
+  async ensureCompanyWorkspace(): Promise<WorkspaceEntity | null> {
+    const existing = await this.workspaces.findOne({ where: { visibility: 'company' } });
+    if (existing) return existing;
+    const admin = await this.dataSource.getRepository(UserEntity).findOne({
+      where: { role: SystemRole.SYSADMIN, status: UserStatus.ACTIVE },
+      order: { createdAt: 'ASC' },
+    });
+    if (!admin) return null;
+    try {
+      return await this.workspaces.save(
+        this.workspaces.create({
+          name: '公司公共空间',
+          description: '已发布的部门文档，公司内部人员均可查看和搜索',
+          ownerId: admin.id,
+          departmentId: null,
+          visibility: 'company',
+        }),
+      );
+    } catch {
+      return this.workspaces.findOne({ where: { visibility: 'company' } });
+    }
+  }
+
+  /** 列出当前用户可见的空间（含角色）：显式成员空间 ∪ 所属部门挂靠的空间（默认 viewer）∪ 公司公共空间。
    *  附带 pending_count（待审核文档数）与 can_review（是否可审核该空间），供审核入口并入空间后展示角标与 Tab */
   async listMine(user: AuthUser) {
     const userId = user.userId;
@@ -47,25 +75,28 @@ export class WorkspacesService {
       .where('m.user_id = :userId', { userId })
       .orderBy('ws.created_at', 'DESC')
       .getMany();
-    const items = rows.map((m) => ({
-      id: m.workspace.id,
-      name: m.workspace.name,
-      description: m.workspace.description,
-      role: m.role,
-      department: m.workspace.department
-        ? { id: m.workspace.department.id, name: m.workspace.department.name }
-        : null,
-      created_at: m.workspace.createdAt,
-    }));
+    const items = rows
+      .filter((m) => m.workspace.visibility !== 'company')
+      .map((m) => ({
+        id: m.workspace.id,
+        name: m.workspace.name,
+        description: m.workspace.description,
+        role: m.role,
+        visibility: m.workspace.visibility,
+        department: m.workspace.department
+          ? { id: m.workspace.department.id, name: m.workspace.department.name }
+          : null,
+        created_at: m.workspace.createdAt,
+      }));
 
     // 部门成员可见的部门空间（未显式加入的部分，以 viewer 身份并入）；
-    // sysadmin 可见全部空间（审核入口并入空间后，需能进入任意空间的待审核 Tab）
+    // sysadmin 可见全部私有空间（审核入口并入空间后，需能进入任意空间的待审核 Tab）
     const isSys = user.role === SystemRole.SYSADMIN;
     const depIds = await this.acl.memberDepartmentIds(userId);
     if (depIds.length > 0 || isSys) {
       const seen = new Set(items.map((i) => i.id));
       const depWs = await this.workspaces.find({
-        where: isSys ? {} : { departmentId: In(depIds) },
+        where: isSys ? { visibility: 'private' } : { departmentId: In(depIds), visibility: 'private' },
         relations: { department: true },
         order: { createdAt: 'DESC' },
       });
@@ -76,10 +107,25 @@ export class WorkspacesService {
           name: ws.name,
           description: ws.description,
           role: WorkspaceRole.VIEWER,
+          visibility: ws.visibility,
           department: ws.department ? { id: ws.department.id, name: ws.department.name } : null,
           created_at: ws.createdAt,
         });
       }
+    }
+
+    // 公共空间对所有在职用户置顶，角色固定 viewer，不参与待审
+    const company = await this.ensureCompanyWorkspace();
+    if (company && !items.some((i) => i.id === company.id)) {
+      items.unshift({
+        id: company.id,
+        name: company.name,
+        description: company.description,
+        role: WorkspaceRole.VIEWER,
+        visibility: 'company',
+        department: null,
+        created_at: company.createdAt,
+      });
     }
 
     if (items.length === 0) return [];
@@ -97,9 +143,21 @@ export class WorkspacesService {
     const countOf = new Map(counts.map((c) => [c.wsId, Number(c.cnt)]));
     return items.map((i) => ({
       ...i,
-      pending_count: countOf.get(i.id) ?? 0,
-      can_review: isSys || (!!i.department && adminDeps.includes(i.department.id)),
+      pending_count: i.visibility === 'company' ? 0 : (countOf.get(i.id) ?? 0),
+      can_review:
+        i.visibility === 'company'
+          ? false
+          : isSys || (!!i.department && adminDeps.includes(i.department.id)),
     }));
+  }
+
+  /** 公共空间是系统入口，不允许改名、改挂部门、删空间或改成员 */
+  private async assertMutable(id: string) {
+    const ws = await this.workspaces.findOne({ where: { id }, select: ['id', 'visibility'] });
+    if (!ws) throw new BizException(ErrorCode.NOT_FOUND, '空间不存在', 404);
+    if (ws.visibility === 'company') {
+      throw new BizException(ErrorCode.PARAM_INVALID, '公司公共空间不可修改或删除', 400);
+    }
   }
 
   async create(user: AuthUser, name: string, description?: string, departmentId?: string) {
@@ -125,6 +183,7 @@ export class WorkspacesService {
           description: description ?? null,
           ownerId: userId,
           departmentId: departmentId ?? null,
+          visibility: 'private',
         }),
       );
       await em.save(
@@ -144,6 +203,7 @@ export class WorkspacesService {
     id: string,
     patch: { name?: string; description?: string; department_id?: string | null },
   ) {
+    await this.assertMutable(id);
     const { department_id, ...rest } = patch;
     // 空间必须挂靠部门：不允许置空
     if (department_id === null) {
@@ -171,6 +231,7 @@ export class WorkspacesService {
   }
 
   async remove(id: string) {
+    await this.assertMutable(id);
     // 非空空间禁止删除：文档的 chunk/ES/Neo4j/MinIO 清理由 worker 异步任务完成，
     // 直接级联删库会留下孤儿数据，要求先逐篇删除文档（各走完整清理流程）
     const docCount = await this.dataSource.getRepository(DocumentEntity).count({
@@ -204,6 +265,7 @@ export class WorkspacesService {
   }
 
   async addMember(workspaceId: string, userId: string, role: WorkspaceRole) {
+    await this.assertMutable(workspaceId);
     const exists = await this.members.findOne({ where: { workspaceId, userId } });
     if (exists) throw new BizException(ErrorCode.CONFLICT, '用户已是空间成员', 409);
     await this.members.save(this.members.create({ workspaceId, userId, role }));
@@ -212,6 +274,7 @@ export class WorkspacesService {
   }
 
   async updateMember(workspaceId: string, userId: string, role: WorkspaceRole) {
+    await this.assertMutable(workspaceId);
     const exists = await this.members.findOne({ where: { workspaceId, userId } });
     if (!exists) throw new BizException(ErrorCode.NOT_FOUND, '成员不存在', 404);
     await this.members.update({ workspaceId, userId }, { role });
@@ -220,6 +283,7 @@ export class WorkspacesService {
   }
 
   async removeMember(workspaceId: string, userId: string) {
+    await this.assertMutable(workspaceId);
     const target = await this.members.findOne({ where: { workspaceId, userId } });
     if (!target) throw new BizException(ErrorCode.NOT_FOUND, '成员不存在', 404);
     if (target.role === WorkspaceRole.OWNER) {

@@ -37,8 +37,9 @@ export class WorkspaceEntity {
   @JoinColumn({ name: 'owner_id' })
   owner: UserEntity;
 
+  /** private：仅成员与部门可见；company：系统公共空间，全员只读，文档本身仍留在部门空间 */
   @Column({ type: 'varchar', length: 16, default: 'private' })
-  visibility: 'private';
+  visibility: 'private' | 'company';
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;

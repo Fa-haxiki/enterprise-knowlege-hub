@@ -23,6 +23,10 @@ export const AgentStateAnnotation = Annotation.Root({
   enableGraph: Annotation<boolean>,
 
   aclWhitelist: Annotation<string[]>({ reducer: (_a, b) => b, default: () => [] }),
+  /** 未绑定空间时，召回并上已发布到公司的文档 */
+  includeCompanyPublic: Annotation<boolean>({ reducer: (_a, b) => b, default: () => false }),
+  /** 会话绑在公共空间：只召回已发布文档，不把白名单收成该空间 id */
+  companyPublicOnly: Annotation<boolean>({ reducer: (_a, b) => b, default: () => false }),
   windowMessages: Annotation<WindowMessage[]>({ reducer: (_a, b) => b, default: () => [] }),
   rollingSummary: Annotation<string>({ reducer: (_a, b) => b, default: () => '' }),
   rewrittenQuery: Annotation<string>({ reducer: (_a, b) => b, default: () => '' }),

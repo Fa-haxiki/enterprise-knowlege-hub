@@ -6,7 +6,7 @@ import type { ChunkHit } from '@ekh/shared';
 import { EmbeddingService } from '../llm/embedding.service';
 import { RerankerService } from '../llm/reranker.service';
 import { EsService } from './es.service';
-import { filterChunksByAcl } from '../agents/agent-acl';
+import { filterChunksByAcl, type AclScope } from '../agents/agent-acl';
 
 export interface RetrieveResult {
   chunks: ChunkHit[];
@@ -30,20 +30,21 @@ export class RetrievalService {
     private readonly config: ConfigService,
   ) {}
 
-  async retrieve(query: string, aclWhitelist: string[]): Promise<RetrieveResult> {
+  async retrieve(query: string, scope: AclScope): Promise<RetrieveResult> {
     const topK = this.config.get<number>('rag.retrieveTopK') ?? 20;
     const degraded: string[] = [];
     const latencies: Record<string, number> = {};
 
-    if (aclWhitelist.length === 0) {
+    // 既没有部门空间、又不包含已发布文档时，没有可召回的范围
+    if (!scope.companyPublicOnly && !scope.includeCompanyPublic && scope.workspaceIds.length === 0) {
       return { chunks: [], degraded: ['acl_empty'], latencies };
     }
 
     // ---- 双路召回（并行，单路故障降级） ----
     const t0 = Date.now();
     const [esResult, vectorResult] = await Promise.allSettled([
-      this.es.search(query, aclWhitelist, topK),
-      this.vectorSearch(query, aclWhitelist, topK),
+      this.es.search(query, scope, topK),
+      this.vectorSearch(query, scope, topK),
     ]);
     latencies.recall = Date.now() - t0;
 
@@ -79,7 +80,7 @@ export class RetrievalService {
     reranked = await this.expandToParents(reranked);
 
     // ---- 结果级 ACL 兜底过滤 ----
-    const filtered = filterChunksByAcl(reranked, aclWhitelist);
+    const filtered = filterChunksByAcl(reranked, scope);
     const stripped = reranked.length - filtered.length;
     if (stripped > 0) {
       this.logger.warn(`acl_filter stripped ${stripped} chunks`);
@@ -88,22 +89,32 @@ export class RetrievalService {
     return { chunks: filtered, degraded, latencies };
   }
 
-  /** PGVector 余弦召回（ACL 前置过滤） */
-  private async vectorSearch(query: string, workspaceIds: string[], topK: number): Promise<ChunkHit[]> {
+  /** PGVector 余弦召回（ACL 前置过滤）。mode 与 ES 的三种范围对齐 */
+  private async vectorSearch(query: string, scope: AclScope, topK: number): Promise<ChunkHit[]> {
     const vec = await this.embedding.embedOne(query);
     const vecLiteral = `[${vec.join(',')}]`;
+    const mode = scope.companyPublicOnly ? 'public_only' : scope.includeCompanyPublic ? 'include_public' : 'whitelist';
+    // 空数组传给 uuid[] 时驱动可能报错；用一个不可能命中的 id 占位，真正放行靠 company_published_at
+    const workspaceIds =
+      scope.workspaceIds.length > 0 ? scope.workspaceIds : ['00000000-0000-0000-0000-000000000000'];
     const rows = await this.dataSource.query(
       `
       SELECT c.id AS chunk_id, c.document_id, c.workspace_id, c.content,
              c.heading_path, c.refs, d.title,
+             (d.company_published_at IS NOT NULL) AS company_public,
              1 - (c.embedding <=> $1::vector) AS raw_score
       FROM document_chunks c
       JOIN documents d ON d.id = c.document_id
-      WHERE c.workspace_id = ANY($2) AND c.embedding IS NOT NULL AND d.deleted_at IS NULL
+      WHERE c.embedding IS NOT NULL AND d.deleted_at IS NULL
+        AND (
+          ($4 = 'public_only' AND d.company_published_at IS NOT NULL)
+          OR ($4 = 'include_public' AND (c.workspace_id = ANY($2::uuid[]) OR d.company_published_at IS NOT NULL))
+          OR ($4 = 'whitelist' AND c.workspace_id = ANY($2::uuid[]))
+        )
       ORDER BY c.embedding <=> $1::vector
       LIMIT $3
       `,
-      [vecLiteral, workspaceIds, topK],
+      [vecLiteral, workspaceIds, topK, mode],
     );
     return rows.map((r: Record<string, unknown>) => ({
       chunk_id: r.chunk_id as string,
@@ -113,6 +124,7 @@ export class RetrievalService {
       content: r.content as string,
       heading_path: (r.heading_path as string[]) ?? [],
       page: (r.refs as { page?: number })?.page,
+      company_public: r.company_public === true,
       raw_score: Number(r.raw_score),
     }));
   }

@@ -17,6 +17,9 @@ const whitelistKey = (userId: string) => `acl:whitelist:${userId}`;
  */
 @Injectable()
 export class AclService {
+  /** 已确认存在的公共空间 id；未创建前不缓存，避免启动早期把「没有」记死 */
+  private companyWorkspaceIdCache: string | null = null;
+
   constructor(
     @InjectRepository(WorkspaceMemberEntity)
     private readonly members: Repository<WorkspaceMemberEntity>,
@@ -30,22 +33,37 @@ export class AclService {
     private readonly config: ConfigService,
   ) {}
 
-  /** 加载用户可见空间白名单（缓存优先）：显式成员空间 ∪ 所属部门挂靠的空间 */
+  /** 系统公共空间 id；没有则返回 null（种子或列表接口会创建） */
+  async companyWorkspaceId(): Promise<string | null> {
+    if (this.companyWorkspaceIdCache) return this.companyWorkspaceIdCache;
+    const ws = await this.workspaces.findOne({ where: { visibility: 'company' }, select: ['id'] });
+    if (ws) this.companyWorkspaceIdCache = ws.id;
+    return ws?.id ?? null;
+  }
+
+  async isCompanyWorkspace(workspaceId: string): Promise<boolean> {
+    const id = await this.companyWorkspaceId();
+    return !!id && id === workspaceId;
+  }
+
+  /** 加载用户可见空间白名单（缓存优先）：显式成员空间 ∪ 所属部门挂靠的空间。公共空间不进白名单，分片仍挂在部门空间上 */
   async getWhitelist(userId: string): Promise<string[]> {
     const key = whitelistKey(userId);
     const cached = await this.redis.getSet(key);
-    if (cached.length > 0) return cached;
+    const companyId = await this.companyWorkspaceId();
+    if (cached.length > 0) return companyId ? cached.filter((id) => id !== companyId) : cached;
 
     const rows = await this.members.find({ where: { userId } });
     const ids = new Set(rows.map((r) => r.workspaceId));
     const depIds = await this.memberDepartmentIds(userId);
     if (depIds.length > 0) {
       const depWs = await this.workspaces.find({
-        where: { departmentId: In(depIds) },
+        where: { departmentId: In(depIds), visibility: 'private' },
         select: ['id'],
       });
       for (const w of depWs) ids.add(w.id);
     }
+    if (companyId) ids.delete(companyId);
     const result = [...ids];
     await this.redis.refreshSet(key, result, this.ttl());
     return result;
@@ -53,9 +71,11 @@ export class AclService {
 
   /**
    * 用户在空间内的角色；非成员返回 null。
+   * 公共空间对任意登录用户固定 viewer（不可上传）。
    * 显式成员角色优先；非成员但属于空间挂靠部门的成员 → 默认 viewer（只读问答，上传需显式授权 editor）
    */
   async getRole(userId: string, workspaceId: string): Promise<WorkspaceRole | null> {
+    if (await this.isCompanyWorkspace(workspaceId)) return WorkspaceRole.VIEWER;
     const row = await this.members.findOne({ where: { userId, workspaceId } });
     if (row) return row.role;
     const ws = await this.workspaces.findOne({ where: { id: workspaceId }, select: ['departmentId'] });

@@ -40,6 +40,22 @@ export class DatabaseInitService implements OnApplicationBootstrap {
         WITH (m = 16, ef_construction = 64)
         WHERE embedding IS NOT NULL
       `);
+
+      // 发布标记：开发环境靠 synchronize 加列，生产不跑 synchronize，这里幂等补齐
+      await this.dataSource.query(
+        `ALTER TABLE documents ADD COLUMN IF NOT EXISTS company_published_at timestamptz`,
+      );
+      await this.dataSource.query(`ALTER TABLE documents ADD COLUMN IF NOT EXISTS published_by uuid`);
+      await this.dataSource.query(`
+        CREATE INDEX IF NOT EXISTS idx_documents_company_published
+        ON documents (company_published_at)
+        WHERE company_published_at IS NOT NULL
+      `);
+      await this.dataSource.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_workspaces_company
+        ON workspaces (visibility)
+        WHERE visibility = 'company'
+      `);
       this.logger.log('database extensions & indexes ready');
     } catch (e) {
       this.logger.warn(`database init skipped: ${(e as Error).message}`);

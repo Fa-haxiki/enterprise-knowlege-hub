@@ -35,7 +35,7 @@ export class LlmService {
 
   createChatModel(options?: { model?: string; temperature?: number; streaming?: boolean; timeout?: number }) {
     return new ChatOpenAI({
-      model: options?.model ?? this.config.get<string>('llm.model') ?? 'deepseek-chat',
+      model: options?.model ?? this.config.get<string>('llm.model') ?? 'doubao-seed-2.0-mini',
       temperature: options?.temperature ?? 0.1,
       streaming: options?.streaming ?? false,
       apiKey: this.config.get<string>('llm.apiKey'),

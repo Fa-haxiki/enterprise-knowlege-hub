@@ -166,10 +166,10 @@ MINIO_PASSWORD=change-me
 MINIO_BUCKET=ekh-docs
 
 # ---- AI 服务 ----
-LLM_BASE_URL=https://api.deepseek.com/v1      # 任意 OpenAI 兼容端点
-LLM_API_KEY=sk-...
-LLM_MODEL=deepseek-chat
-LLM_ROUTER_MODEL=deepseek-chat                 # 复杂度分类可配小模型
+LLM_BASE_URL=https://ark.cn-beijing.volces.com/api/plan/v3
+LLM_API_KEY=ark-...
+LLM_MODEL=doubao-seed-2.0-mini
+LLM_ROUTER_MODEL=doubao-seed-2.0-mini          # 复杂度分类、改写等内部调用
 EMBEDDING_BASE_URL=http://embedding:8001/v1
 EMBEDDING_MODEL=bge-m3
 EMBEDDING_DIM=1024
