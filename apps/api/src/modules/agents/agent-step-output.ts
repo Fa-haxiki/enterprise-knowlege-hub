@@ -78,7 +78,12 @@ export function buildNodeOutput(name: string, merged: Partial<AgentState>): Reco
       out.summary = `${merged.windowMessages?.length ?? 0} 条窗口消息`;
       break;
     case 'llm_generate':
-      out.summary = merged.answer ? `回答 ${merged.answer.length} 字` : '生成回答';
+      // 模型报错时回答正文就是报错原文，步骤摘要直接展示，方便在轨迹里看到
+      out.summary = merged.degraded?.includes('llm_generate')
+        ? (merged.answer || '生成失败').slice(0, 300)
+        : merged.answer
+          ? `回答 ${merged.answer.length} 字`
+          : '生成回答';
       break;
     default:
       break;

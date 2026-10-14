@@ -33,7 +33,8 @@ import { heuristicEvaluate, parseEvaluateJson, shouldTakeFastPath } from './agen
 import { buildNodeOutput, compactChunks, compactWebHits } from './agent-step-output';
 import { needsQueryRewrite, sanitizeRewriteHistory } from './agent-query-rewrite';
 import { AGENT_TOOL_SCHEMAS, WebSearchService } from './tools';
-import { filterChunksByAcl } from './agent-acl';
+import { filterChunksByAcl, whitelistScope, type AclScope } from './agent-acl';
+import { formatLlmError } from './llm-error';
 
 function isAbortLike(e: unknown): boolean {
   const name = e instanceof Error ? e.name : '';
@@ -209,12 +210,14 @@ export class AgentService {
         const output = buildNodeOutput(name, { ...state, ...result });
         this.langfuse.endSpan(span, { ...this.spanOutput(name, result), ...output });
         const latency = Date.now() - t0;
-        rawCb?.onStepEnd?.(name, latency, false, output);
+        // 生成回答失败时节点仍正常返回，用 degraded 标记这一步，回答正文已是报错原文
+        const stepFailed = Array.isArray(result.degraded) && result.degraded.includes(name);
+        rawCb?.onStepEnd?.(name, latency, stepFailed, output);
         const extra = Array.isArray(result.nodeLatencies) ? result.nodeLatencies : [];
         return {
           ...result,
           nodeLatencies: [
-            ...asLatency(name, latency, iteration, false, {
+            ...asLatency(name, latency, iteration, stepFailed, {
               detail: typeof output.summary === 'string' ? output.summary : undefined,
               output,
             }),
@@ -225,11 +228,27 @@ export class AgentService {
         gate.live = false;
         this.langfuse.endSpan(span, {}, e as Error);
         const aborted = isAbortLike(e) || this.signalOf(config)?.aborted;
-        rawCb?.onStepEnd?.(name, Date.now() - t0, true, aborted ? { summary: '已停止' } : undefined);
         if (aborted) {
+          rawCb?.onStepEnd?.(name, Date.now() - t0, true, { summary: '已停止' });
           throw isAbortLike(e) && e instanceof Error ? e : abortedError();
         }
         this.logger.warn(`node ${name} degraded: ${(e as Error).message}`);
+        // 最终回答没生成出来时，把报错原文当作回答推给前端并落库，而不是留空
+        if (name === 'llm_generate') {
+          const errText = formatLlmError(e);
+          rawCb?.onToken?.(errText);
+          const output = { summary: errText };
+          rawCb?.onStepEnd?.(name, Date.now() - t0, true, output);
+          return {
+            answer: errText,
+            degraded: [name],
+            nodeLatencies: asLatency(name, Date.now() - t0, iteration, true, {
+              detail: errText,
+              output,
+            }),
+          };
+        }
+        rawCb?.onStepEnd?.(name, Date.now() - t0, true);
         const fallback = name === 'intent_router' ? this.intentRouterFallback(state, rawCb) : {};
         return {
           ...fallback,
@@ -456,10 +475,27 @@ export class AgentService {
 
   private async aclGuard(state: AgentState): Promise<Partial<AgentState>> {
     const whitelist = await this.acl.getWhitelist(state.userId);
-    const effective = state.workspaceId
-      ? whitelist.filter((id) => id === state.workspaceId)
-      : whitelist;
-    return { aclWhitelist: effective };
+    // 公共空间不是分片的 workspace_id，收成该 id 会把已发布文档滤掉
+    if (state.workspaceId && (await this.acl.isCompanyWorkspace(state.workspaceId))) {
+      return { aclWhitelist: [], includeCompanyPublic: false, companyPublicOnly: true };
+    }
+    if (state.workspaceId) {
+      return {
+        aclWhitelist: whitelist.filter((id) => id === state.workspaceId),
+        includeCompanyPublic: false,
+        companyPublicOnly: false,
+      };
+    }
+    return { aclWhitelist: whitelist, includeCompanyPublic: true, companyPublicOnly: false };
+  }
+
+  /** 本次问答的召回范围，与 aclGuard 写入的标记一致 */
+  private retrievalScope(state: AgentState): AclScope {
+    return {
+      workspaceIds: state.aclWhitelist,
+      includeCompanyPublic: state.includeCompanyPublic,
+      companyPublicOnly: state.companyPublicOnly,
+    };
   }
 
   private async loadWindow(state: AgentState): Promise<Partial<AgentState>> {
@@ -689,8 +725,9 @@ export class AgentService {
       try {
         let output: Record<string, unknown> = {};
         if (name === ToolName.KB_RETRIEVE) {
-          const got = await this.retrieval.retrieve(state.rewrittenQuery, state.aclWhitelist);
-          chunks = filterChunksByAcl(got.chunks, state.aclWhitelist);
+          const scope = this.retrievalScope(state);
+          const got = await this.retrieval.retrieve(state.rewrittenQuery, scope);
+          chunks = filterChunksByAcl(got.chunks, scope);
           if (got.degraded.length) degraded.push(...got.degraded);
           output = {
             summary: `混合检索完成，Rerank 后 ${chunks.length} 条`,
@@ -969,9 +1006,11 @@ export class AgentService {
     const chunkIds = await this.graphDb.chunkIdsByEntityNames(involved, state.aclWhitelist, 8);
     if (chunkIds.length === 0) return { graphTriples: triples };
 
+    // 图谱反查仍只认部门空间白名单，避免未发布文档的关系被公共问答带出
+    const graphScope = whitelistScope(state.aclWhitelist);
     const graphChunks = filterChunksByAcl(
       await this.retrieval.chunksByIds(chunkIds, state.aclWhitelist),
-      state.aclWhitelist,
+      graphScope,
     );
     const existing = new Set(chunks.map((c) => c.chunk_id));
     const appended = graphChunks.filter((c) => !existing.has(c.chunk_id));
@@ -1037,7 +1076,10 @@ export class AgentService {
       hour12: false,
       weekday: 'long',
     });
-    const insufficient = state.evidenceGrade === EvidenceGrade.GIVE_UP;
+    const hasRefs =
+      state.rerankedChunks.length > 0 || state.graphTriples.length > 0 || state.webHits.length > 0;
+    // 没资料或评估放弃时才允许「无法确认」。有参考资料时小模型会照抄这句套话，把已经检索到的内容说成没权限
+    const insufficient = !hasRefs || state.evidenceGrade === EvidenceGrade.GIVE_UP;
     const systemPrompt =
       `你是超级码知枢（企业智能知识与问答平台）的助手。当前时间：${now}（北京时间）。规则：\n` +
       '1. 仅依据「参考资料」「知识图谱推理链路」与「外部公开信息」回答，不得编造内部事实；\n' +
@@ -1045,10 +1087,12 @@ export class AgentService {
       '3. 外部公开信息与内部资料分开表述，不要把网页当成内部制度；\n' +
       (insufficient
         ? '4. 现有资料不足，必须明确说明"根据现有资料无法确认"，并建议联系知识管理员；\n'
-        : '4. 资料不足时明确说明"根据现有资料无法确认"，并建议联系知识管理员；\n') +
+        : '4. 参考资料已经给出，必须据此作答。把资料里能确认的规则、责任人、金额、审批条件写出来并标注引用。资料没写成逐步流程图时，也要概括已有事实，禁止整段回答「无法确认」或让用户联系知识管理员。只有资料完全没有提到该问题时，才说明无法确认。\n') +
       '5. 回答使用与用户相同的语言，条理清晰，复杂问题分点作答。';
 
-    const userPrompt = `${sections.join('\n\n')}\n\n## 当前问题\n${state.rewrittenQuery || state.query}`;
+    const userPrompt = `${sections.join('\n\n')}\n\n## 当前问题\n${state.rewrittenQuery || state.query}${
+      hasRefs && !insufficient ? '\n\n这些参考资料已通过权限校验，请直接根据资料回答。' : ''
+    }`;
 
     return {
       promptMessages: [new SystemMessage(systemPrompt), new HumanMessage(userPrompt)],
@@ -1075,15 +1119,30 @@ export class AgentService {
     });
 
     let answer = '';
+    let generateFailed = false;
     const signal = this.signalOf(config);
     const { iterator, usage } = this.llm.streamChat(messages, { signal });
-    for await (const delta of iterator) {
-      // 停了就抛出，不能带着半截答案正常返回，否则这一步算成功、整轮会落库
+    try {
+      for await (const delta of iterator) {
+        // 停了就抛出，不能带着半截答案正常返回，否则这一步算成功、整轮会落库
+        if (signal?.aborted) throw abortedError();
+        answer += delta;
+        callbacks?.onToken(delta);
+      }
       if (signal?.aborted) throw abortedError();
-      answer += delta;
+    } catch (e) {
+      if (isAbortLike(e) || signal?.aborted) {
+        this.langfuse.endGeneration(generation, { output: answer.slice(0, 2000), usage });
+        throw isAbortLike(e) ? e : abortedError();
+      }
+      // 额度不足、限流、网关错误：原文接在已生成内容后面，作为这次的回答
+      const errText = formatLlmError(e);
+      const delta = answer ? `\n\n${errText}` : errText;
+      answer = answer ? `${answer}${delta}` : errText;
       callbacks?.onToken(delta);
+      generateFailed = true;
+      this.logger.warn(`llm_generate failed: ${errText}`);
     }
-    if (signal?.aborted) throw abortedError();
     this.langfuse.endGeneration(generation, { output: answer.slice(0, 2000), usage });
 
     const groups = this.groupChunksByDocument(state.rerankedChunks);
@@ -1128,7 +1187,7 @@ export class AgentService {
       }
     }
 
-    return { answer, citations, usage };
+    return generateFailed ? { answer, citations, usage, degraded: ['llm_generate'] } : { answer, citations, usage };
   }
 
   private groupChunksByDocument(chunks: ChunkHit[]): Array<{

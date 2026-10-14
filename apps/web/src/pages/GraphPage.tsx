@@ -47,17 +47,23 @@ export default function GraphPage() {
 
     const load = async () => {
       try {
-        const [wsList, nodeRes, edgeRes] = await Promise.all([
-          api.get<{ id: string; name: string }[]>('/workspaces'),
-          api.get<{ items: GraphNode[] }>(`/workspaces/${workspaceId}/graph/nodes?limit=500`),
-          api.get<{ items: GraphEdge[] }>(`/workspaces/${workspaceId}/graph/edges?limit=1000`),
-        ]);
+        const wsList = await api.get<{ id: string; name: string; visibility?: string }[]>('/workspaces');
         if (cancelled) return;
         const ws = wsList.find((w) => w.id === workspaceId);
         if (!ws) {
           navigate('/workspaces', { replace: true });
           return;
         }
+        // 公共空间的实体仍挂在部门空间上，这里打开会是空图，直接回到文档列表
+        if (ws.visibility === 'company') {
+          navigate(`/workspaces/${workspaceId}/documents`, { replace: true });
+          return;
+        }
+        const [nodeRes, edgeRes] = await Promise.all([
+          api.get<{ items: GraphNode[] }>(`/workspaces/${workspaceId}/graph/nodes?limit=500`),
+          api.get<{ items: GraphEdge[] }>(`/workspaces/${workspaceId}/graph/edges?limit=1000`),
+        ]);
+        if (cancelled) return;
         setWsName(ws.name);
         setNodes(nodeRes.items);
         setEdges(edgeRes.items);

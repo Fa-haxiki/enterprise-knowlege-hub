@@ -5,6 +5,7 @@ import { WorkspaceEntity } from '../../database/entities/workspace.entity';
 import { AuthModule } from '../auth/auth.module';
 import { WorkspacesModule } from '../workspaces/workspaces.module';
 import { IngestionModule } from '../ingestion/ingestion.module';
+import { RetrievalModule } from '../retrieval/retrieval.module';
 import { DocumentsController } from './documents.controller';
 import { DocumentsService } from './documents.service';
 import { StorageService } from './storage.service';
@@ -15,6 +16,7 @@ import { StorageService } from './storage.service';
     AuthModule,
     WorkspacesModule,
     IngestionModule,
+    RetrievalModule,
   ],
   controllers: [DocumentsController],
   providers: [DocumentsService, StorageService],

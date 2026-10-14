@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Client } from '@elastic/elasticsearch';
+import type { AclScope } from '../agents/agent-acl';
 
 /** Elasticsearch 客户端封装：索引初始化 + 关键词召回 + 写入 */
 @Injectable()
@@ -65,6 +66,13 @@ export class EsService implements OnModuleInit {
             properties: { parent_id: { type: 'keyword' } },
           });
         }
+        // 已有索引补发布标记；缺省字段查询 term true 不会命中，等价于未发布
+        if (!props?.company_public) {
+          await this.client.indices.putMapping({
+            index: this.index,
+            properties: { company_public: { type: 'boolean' } },
+          });
+        }
         const analyzer = await this.currentAnalyzer('content');
         const want = useIk ? 'ik_max_word' : 'standard';
         if (analyzer === want) return;
@@ -98,6 +106,7 @@ export class EsService implements OnModuleInit {
             },
             heading_path: { type: 'keyword' },
             parent_id: { type: 'keyword' },
+            company_public: { type: 'boolean' },
             created_at: { type: 'date' },
           },
         },
@@ -109,8 +118,22 @@ export class EsService implements OnModuleInit {
     }
   }
 
+  /**
+   * 召回过滤：部门空间白名单，或并上已发布文档，或只要已发布文档。
+   * 空 terms 会被 ES 拒绝，所以没有空间 id 时不放 terms 子句。
+   */
+  private aclFilter(scope: AclScope): Record<string, unknown> {
+    if (scope.companyPublicOnly) return { term: { company_public: true } };
+    const clauses: Record<string, unknown>[] = [];
+    if (scope.workspaceIds.length > 0) clauses.push({ terms: { workspace_id: scope.workspaceIds } });
+    if (scope.includeCompanyPublic) clauses.push({ term: { company_public: true } });
+    if (clauses.length === 1) return clauses[0];
+    if (clauses.length === 0) return { match_none: {} };
+    return { bool: { should: clauses, minimum_should_match: 1 } };
+  }
+
   /** BM25 关键词召回，ACL 前置过滤 */
-  async search(query: string, workspaceIds: string[], topK: number) {
+  async search(query: string, scope: AclScope, topK: number) {
     const res = await this.client.search({
       index: this.index,
       size: topK,
@@ -125,10 +148,10 @@ export class EsService implements OnModuleInit {
               },
             },
           ],
-          filter: [{ terms: { workspace_id: workspaceIds } }],
+          filter: [this.aclFilter(scope)],
         },
       },
-      _source: ['chunk_id', 'document_id', 'workspace_id', 'title', 'heading_path', 'parent_id'],
+      _source: ['chunk_id', 'document_id', 'workspace_id', 'title', 'heading_path', 'parent_id', 'company_public'],
     });
     return res.hits.hits.map((h) => ({
       chunk_id: (h._source as Record<string, unknown>).chunk_id as string,
@@ -137,6 +160,7 @@ export class EsService implements OnModuleInit {
       title: (h._source as Record<string, unknown>).title as string,
       heading_path: ((h._source as Record<string, unknown>).heading_path as string[]) ?? [],
       parent_id: (h._source as Record<string, unknown>).parent_id as string | undefined,
+      company_public: (h._source as Record<string, unknown>).company_public === true,
       raw_score: h._score ?? 0,
     }));
   }
@@ -144,11 +168,11 @@ export class EsService implements OnModuleInit {
   /** 关键词搜索（带高亮片段）：供文档搜索页使用，ACL 前置过滤；支持类型/入库时间筛选 */
   async searchWithHighlight(
     query: string,
-    workspaceIds: string[],
+    scope: AclScope,
     topK: number,
     filters?: { docTypes?: string[]; dateFrom?: string; dateTo?: string },
   ) {
-    const filter: Record<string, unknown>[] = [{ terms: { workspace_id: workspaceIds } }];
+    const filter: Record<string, unknown>[] = [this.aclFilter(scope)];
     if (filters?.docTypes?.length) filter.push({ terms: { doc_type: filters.docTypes } });
     if (filters?.dateFrom || filters?.dateTo) {
       const range: Record<string, string> = {};
@@ -207,12 +231,32 @@ export class EsService implements OnModuleInit {
     content: string;
     heading_path: string[];
     parent_id?: string | null;
+    company_public?: boolean;
   }) {
     await this.client.index({
       index: this.index,
       id: doc.chunk_id,
-      document: { ...doc, created_at: new Date().toISOString() },
+      document: {
+        ...doc,
+        company_public: doc.company_public === true,
+        created_at: new Date().toISOString(),
+      },
       refresh: false,
+    });
+  }
+
+  /** 发布/撤回后按文档改分片上的 company_public，不必整篇重建索引 */
+  async setCompanyPublic(documentId: string, companyPublic: boolean): Promise<void> {
+    await this.client.updateByQuery({
+      index: this.index,
+      query: { term: { document_id: documentId } },
+      script: {
+        source: 'ctx._source.company_public = params.flag',
+        lang: 'painless',
+        params: { flag: companyPublic },
+      },
+      refresh: true,
+      conflicts: 'proceed',
     });
   }
 

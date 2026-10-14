@@ -18,7 +18,8 @@ flowchart TB
 | viewer | 否 | 否 | 否 | 否 | 是 |
 
 - 系统级角色 `sysadmin` 独立于人空间角色，负责用户管理、模型配置、审计
-- 空间默认 `private`，仅成员可见；不支持「全公司公开」空间（一期收紧，避免误配）
+- 空间默认 `private`，仅成员与所属部门可见
+- 系统有一个 `visibility=company` 的「公司公共空间」，全员只读，不能上传或删除。部门文档不会复制进去：`documents.company_published_at` 非空表示该篇已发布，原文仍在部门空间，更新同一份分片。检索在空间白名单之外并上这些已发布分片；图谱多跳仍只走用户本来能进的部门空间，避免未发布文档的实体关系被带出
 
 ## 2. 权限白名单缓存（Redis）
 
@@ -68,7 +69,7 @@ sequenceDiagram
 
 双重过滤（实现细节见 [05-rag-pipeline.md](05-rag-pipeline.md) §4）：
 
-1. **前置过滤**：ES `terms filter`、PGVector `WHERE workspace_id = ANY($白名单)`、Neo4j 反查 chunk 时同样带白名单
+1. **前置过滤**：ES / PGVector 按 `workspace_id ∈ 白名单`，未指定空间时再并上 `company_public = true`（已发布单篇）。指定部门空间时不加这一支。Neo4j 多跳仍只带部门空间白名单，不因发布而放开
 2. **结果过滤**：进入 Prompt 前逐分片校验，越权分片剔除并记录审计日志（`action=acl_stripped`，用于发现越权漏洞）
 
 约束：

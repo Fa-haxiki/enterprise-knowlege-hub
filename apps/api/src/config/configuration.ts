@@ -47,10 +47,10 @@ export default () => ({
     publicPort: parseInt(process.env.MINIO_PUBLIC_PORT ?? process.env.MINIO_PORT ?? '9000', 10),
   },
   llm: {
-    baseURL: process.env.LLM_BASE_URL ?? 'https://api.deepseek.com/v1',
+    baseURL: process.env.LLM_BASE_URL ?? 'https://ark.cn-beijing.volces.com/api/plan/v3',
     apiKey: process.env.LLM_API_KEY ?? '',
-    model: process.env.LLM_MODEL ?? 'deepseek-chat',
-    routerModel: process.env.LLM_ROUTER_MODEL ?? process.env.LLM_MODEL ?? 'deepseek-chat',
+    model: process.env.LLM_MODEL ?? 'doubao-seed-2.0-mini',
+    routerModel: process.env.LLM_ROUTER_MODEL ?? process.env.LLM_MODEL ?? 'doubao-seed-2.0-mini',
   },
         embedding: {
           baseURL: process.env.EMBEDDING_BASE_URL ?? 'https://dashscope.aliyuncs.com/compatible-mode/v1',

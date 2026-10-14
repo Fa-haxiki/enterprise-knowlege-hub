@@ -117,4 +117,6 @@ export interface ChunkHit {
   rerank_score?: number;
   /** 是否由图谱实体反查补充（图增强检索） */
   via_graph?: boolean;
+  /** 文档已发布到公司公共空间；结果级 ACL 据此放行白名单外的分片 */
+  company_public?: boolean;
 }

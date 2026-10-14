@@ -92,3 +92,10 @@
 - **根因**：`cancel()` 只把 AbortSignal 标成 aborted。节点里的 `catch` 把中止当成普通失败吞掉，`llmGenerate` 遇到停止只 `break` 然后正常返回。图因此调度下一步，控制器走成功分支 `saveAssistantMessage`，`RunSnapshot` 只有抛错时才用
 - **修复**：节点用 `raceSignal` 在停止时立刻失败并向上抛；模型调用带上 signal；成功返回前再看一次 `abort.signal`，已停止则改走快照落库
 - **相关**：`agent.service.ts` `wrap` / `llmGenerate`、`agui.controller.ts`、`llm.service.ts`
+
+## 已检索到资料仍回答「无法确认 / 联系知识管理员」
+
+- **现象**：时间线里知识库检索有命中、评估为「资料充分」，最终回答仍是「根据现有资料无法确认…建议联系知识管理员」（约 39 字）
+- **根因**：生成用的 system prompt 无论有没有参考资料都要求说这句话。`doubao-seed-2.0-mini` 会照抄套话，并不是 ACL 把分片滤掉了
+- **修复**：`promptBuild` 仅在没有参考资料或评估为放弃时才允许这句；有资料时要求据实作答并写明资料已通过权限校验（`agent.service.ts`）
+- **相关**：`apps/api/src/modules/agents/agent.service.ts` `promptBuild`

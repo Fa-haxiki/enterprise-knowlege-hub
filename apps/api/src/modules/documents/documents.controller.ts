@@ -94,6 +94,31 @@ export class DocumentsController {
     );
   }
 
+  /** 发布到公司公共空间 / 撤回。权限与索引同步在 service 内完成 */
+  @Post('documents/:id/publish')
+  async publish(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthUser) {
+    const result = await this.documents.publish(user, id, true);
+    this.audit.record({
+      userId: user.userId,
+      action: 'document_publish',
+      resourceType: 'document',
+      resourceId: id,
+    });
+    return result;
+  }
+
+  @Post('documents/:id/unpublish')
+  async unpublish(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() user: AuthUser) {
+    const result = await this.documents.publish(user, id, false);
+    this.audit.record({
+      userId: user.userId,
+      action: 'document_unpublish',
+      resourceType: 'document',
+      resourceId: id,
+    });
+    return result;
+  }
+
   /** 文档审核：通过入队解析 / 拒绝标记理由（service 内校验审核员权限） */
   @Post('documents/:id/review')
   async review(

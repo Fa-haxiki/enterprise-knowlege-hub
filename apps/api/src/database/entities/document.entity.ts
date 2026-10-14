@@ -59,6 +59,14 @@ export class DocumentEntity {
   @Column({ name: 'review_note', type: 'text', nullable: true })
   reviewNote: string | null;
 
+  /** 发布到公司公共空间的时间；空表示仅部门内可见 */
+  @Column({ name: 'company_published_at', type: 'timestamptz', nullable: true })
+  companyPublishedAt: Date | null;
+
+  /** 执行发布的用户；撤回后清空 */
+  @Column({ name: 'published_by', type: 'uuid', nullable: true })
+  publishedBy: string | null;
+
   @Column({ type: 'jsonb', default: {} })
   meta: Record<string, unknown>;
 
